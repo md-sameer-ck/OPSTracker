@@ -40,7 +40,7 @@ const ACTION_PATTERNS = [
   // A terse completion is still a fix. This project is full of them — "Duplicate
   // app deleted", "Report generated" — and they lose the substance bonus badly
   // for being short, so they need their own way of clearing the floor.
-  [/^(?:\w+[ ,]+){0,5}(?:deleted|generated|created|removed|added|amended|corrected|voided|cleared|fixed|resolved|reversed|completed|actioned|processed|done)\b[^?]{0,40}$/i, 10],
+  [/^(?!\s*(?:closed?|thanks?|thank you|noted|fyi)\b)(?:\w+[ ,]+){0,5}(?:deleted|generated|created|removed|added|amended|corrected|updated|voided|cleared|fixed|resolved|reversed|completed|actioned|processed|funded|restored|cancelled|done)\b[^?]{0,40}$/i, 10],
 ];
 
 /** Someone explained the cause. Almost as valuable as the action itself. */
@@ -57,7 +57,10 @@ const EXPLANATION_PATTERNS = [
 
 /** Sign-offs, chasers and questions — the things that are not a fix. */
 const NOISE_PATTERNS = [
-  [/\bclosed? as (?:complete|per|resolved)/i, -10],
+  // Any "closed as …" is a status sign-off, whatever follows it. Narrowing this
+  // to a list of endings let "closed as confirmed updated" through, because the
+  // trailing verb then matched the terse-completion rule.
+  [/\bclosed? as\b/i, -10],
   [/\bticket can be closed\b/i, -8],
   [/\bcan (?:this|it) be closed\b/i, -8],
   [/\b(?:many )?thanks?\b/i, -4],
@@ -143,6 +146,12 @@ export function buildDigest(issue) {
   const authoredFix = authored(FIX_NOTE_MARKER);
   const authoredIssue = authored(ISSUE_NOTE_MARKER);
 
+  // Jira's own "Resolution Comments" field. When somebody filled it in, that is
+  // a fix written on purpose, by a person, in the place meant for it — it beats
+  // anything this file could score out of a comment thread. It sits just below
+  // an OPSTracker note, which is the more recent deliberate act.
+  const resolutionField = String(issue?.resolutionComments || "").trim();
+
   // Comments that are OPSTracker's own notes must not compete for the
   // extracted-fix slot, or the app starts quoting itself.
   const threadComments = comments.filter((c) => {
@@ -162,6 +171,33 @@ export function buildDigest(issue) {
     return {
       issue: issueSummary,
       fix: { text: authoredFix.text, source: "authored", author: authoredFix.author, created: authoredFix.created, commentId: authoredFix.commentId },
+      thread: threadComments,
+    };
+  }
+
+  // The field is the place meant for the fix, so it gets the benefit of the
+  // doubt: it is used unless it reads as *nothing but* a sign-off. That
+  // inversion matters — a terse entry like "1951 now funded" scores neutrally
+  // and is still the answer, while "Closed as complete after Finance review"
+  // is a status update someone typed into the wrong box, and presenting it as
+  // the fix would be exactly the failure this file exists to avoid.
+  //
+  // A rejected field is not hidden. It is handed back as `fieldNote` so the UI
+  // can say the field was filled in and what it says, rather than implying the
+  // team left it empty.
+  const SIGN_OFF_FLOOR = -3;
+  const fieldScore = resolutionField ? scoreComment(resolutionField, "assignee", 0, 1).score : null;
+  const fieldIsSignOff = resolutionField && fieldScore <= SIGN_OFF_FLOOR;
+
+  if (resolutionField && !fieldIsSignOff) {
+    return {
+      issue: issueSummary,
+      fix: {
+        text: resolutionField,
+        source: "resolution-field",
+        confidence: fieldScore >= 6 ? "high" : "low",
+        score: Math.round(fieldScore * 10) / 10,
+      },
       thread: threadComments,
     };
   }
@@ -186,7 +222,13 @@ export function buildDigest(issue) {
   if (!best || best.score < CONFIDENCE_FLOOR) {
     return {
       issue: issueSummary,
-      fix: { text: "", source: "none", confidence: "none", candidate: best ? truncate(best.clean, 200) : "" },
+      fix: {
+        text: "",
+        source: "none",
+        confidence: "none",
+        candidate: best ? truncate(best.clean, 200) : "",
+        ...(fieldIsSignOff ? { fieldNote: resolutionField } : {}),
+      },
       thread: threadComments,
     };
   }
@@ -204,6 +246,7 @@ export function buildDigest(issue) {
       created: best.created,
       commentId: best.id,
       score: Math.round(best.score * 10) / 10,
+      ...(fieldIsSignOff ? { fieldNote: resolutionField } : {}),
     },
     thread: threadComments,
   };

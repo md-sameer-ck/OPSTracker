@@ -5,15 +5,12 @@
 // built, because the fix only exists inside the thread.
 
 import { getCredentials, json, jiraFetch, preflight, PROJECT_KEY } from "./_jira.js";
-import { extractRefs } from "../../site/lib/refs.js";
-import { classify } from "../../site/lib/taxonomy.js";
+import { BASE_FIELDS, normaliseIssue } from "./_fields.js";
+import { extractIssueKeys, extractRefs } from "../../site/lib/refs.js";
 import { fieldToText } from "../../site/lib/text.js";
 import { buildDigest } from "../../site/lib/digest.js";
 
-const ISSUE_FIELDS = [
-  "summary", "description", "status", "issuetype", "priority", "labels",
-  "components", "assignee", "reporter", "created", "updated", "resolutiondate", "comment",
-];
+const ISSUE_FIELDS = [...BASE_FIELDS, "comment"];
 
 export const handler = async (event) => {
   if (event.httpMethod === "OPTIONS") return preflight();
@@ -34,9 +31,7 @@ export const handler = async (event) => {
       { credentials }
     );
     const fields = issue.fields || {};
-    const summary = fields.summary || "";
-    const description = fieldToText(fields.description);
-    const components = (fields.components || []).map((c) => c.name).filter(Boolean);
+    const record = normaliseIssue(issue, { full: true });
 
     const comments = (fields.comment?.comments || []).map((c) => ({
       id: c.id,
@@ -47,40 +42,36 @@ export const handler = async (event) => {
       updated: c.updated !== c.created ? c.updated : null,
     }));
 
-    const normalised = {
-      summary,
-      description,
+    const digest = buildDigest({
+      summary: record.summary,
+      description: record.description,
+      // Jira's own "Resolution Comments" field, when someone filled it in, is a
+      // fix a person wrote deliberately — it outranks anything scraped out of
+      // the thread. See buildDigest.
+      resolutionComments: record.resolutionComments,
       comments,
-      assigneeId: fields.assignee?.accountId || null,
-      reporterId: fields.reporter?.accountId || null,
-    };
-
-    const digest = buildDigest(normalised);
-    const { primary, secondary } = classify({ summary, description, components });
+      assigneeId: record.assignee?.accountId || null,
+      reporterId: record.reporter?.accountId || null,
+    });
 
     // Comments are in scope here, so this ticket's reference list can be more
     // complete than the index's — a loan mentioned only in the thread shows up.
-    const refs = extractRefs([summary, description, ...comments.map((c) => c.body)].join("\n"));
+    const refs = extractRefs(
+      [record.summary, record.description, record.resolutionComments, ...comments.map((c) => c.body)].join("\n")
+    );
+
+    // Cross-references buried in the thread — "as a part of OPS - 806" — which
+    // the index cannot see because it never loads comments.
+    const threadMentions = extractIssueKeys(
+      comments.map((c) => c.body).join("\n"),
+      PROJECT_KEY,
+      issue.key
+    ).filter((key) => !record.mentions.includes(key));
 
     return json(200, {
-      key: issue.key,
+      ...record,
+      threadMentions,
       url: `https://${credentials.domain}/browse/${issue.key}`,
-      summary,
-      description,
-      status: fields.status?.name || "Unknown",
-      statusCategory: fields.status?.statusCategory?.key || "undefined",
-      priority: fields.priority?.name || "None",
-      type: fields.issuetype?.name || "",
-      components,
-      labels: fields.labels || [],
-      assignee: fields.assignee?.displayName || null,
-      reporter: fields.reporter?.displayName || null,
-      created: fields.created || null,
-      updated: fields.updated || null,
-      resolved: fields.resolutiondate || null,
-      topic: primary.id,
-      topicLabel: primary.label,
-      secondaryTopics: secondary.map((t) => ({ id: t.id, label: t.label })),
       loans: refs.filter((r) => r.type === "LAI").map((r) => r.canonical),
       refs: refs.filter((r) => r.type !== "LAI").map((r) => ({ type: r.type, canonical: r.canonical })),
       digest,

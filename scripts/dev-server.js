@@ -41,8 +41,12 @@ const MIME = {
 async function invokeFunction(name, request) {
   const modulePath = path.join(ROOT, "netlify", "functions", `${name}.js`);
   if (!existsSync(modulePath)) return { statusCode: 404, headers: {}, body: JSON.stringify({ error: `No function named ${name}` }) };
-  // Cache-busted so editing a function does not need a server restart.
-  const module = await import(`${modulePath}?v=${Date.now()}`);
+  // Keyed on the file's mtime, not the clock: a fresh key on every request would
+  // re-instantiate the module each time, throwing away the in-memory response
+  // cache that lives in its module scope — which made local dev re-fetch all 853
+  // tickets on every single call. This still picks up edits without a restart.
+  const { mtimeMs } = await stat(modulePath);
+  const module = await import(`${modulePath}?v=${mtimeMs}`);
   return module.handler(request);
 }
 

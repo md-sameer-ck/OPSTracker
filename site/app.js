@@ -10,6 +10,11 @@ import { normaliseLoanQuery, refNumber } from "./lib/refs.js";
 import { TOPICS, UNCATEGORISED, getTopic } from "./lib/taxonomy.js";
 import { truncate } from "./lib/text.js";
 import { FIX_NOTE_MARKER, ISSUE_NOTE_MARKER } from "./lib/digest.js";
+import {
+  assigneeName, calendarMs, ckUserName, firstResponseMs, formatDuration, formatWorkTime,
+  isOpen as ticketIsOpen, isResolved, median, slaBreached, slaElapsedMs, summarise,
+  throughputBy, toHours, UNASSIGNED,
+} from "./lib/stats.js";
 
 const API = "/api";
 
@@ -20,9 +25,21 @@ const state = {
   selectedLoan: null,
   openTicket: null,
   ticketSort: { column: "created", direction: -1 },
+  peopleSort: { column: "resolved", direction: -1 },
+  onlyMine: false,
   charts: {},
   detailCache: new Map(),
 };
+
+// Bump when the index record shape changes, so a cached copy from an older
+// build is discarded rather than rendered with missing fields.
+const CACHE_VERSION = "v2";
+const CACHE_KEY = `opstracker-index-${CACHE_VERSION}`;
+const CACHE_ETAG_KEY = `opstracker-etag-${CACHE_VERSION}`;
+// How long a browser copy is served without asking Jira at all. Building the
+// index costs ~5 seconds and one full pass over the project, so re-fetching it
+// on every reload is exactly the pattern that runs into rate limits.
+const CACHE_TTL_MS = 10 * 60 * 1000;
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, className, text) => {
@@ -53,21 +70,12 @@ function relative(value) {
   return `${years} years ago`;
 }
 
-const isOpen = (issue) => issue.statusCategory !== "done";
+const isOpen = ticketIsOpen;
 
-/** Days a ticket took, or has been open so far. */
+/** Calendar days a ticket took, or has been open so far. */
 function ageDays(issue) {
-  const from = asDate(issue.created);
-  if (!from) return null;
-  const to = asDate(issue.resolved) || new Date();
-  return Math.max(0, Math.round((to - from) / 86400000));
-}
-
-function median(numbers) {
-  if (!numbers.length) return null;
-  const sorted = [...numbers].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+  const ms = calendarMs(issue);
+  return ms == null ? null : Math.round(ms / 86400000);
 }
 
 const topicLabel = (id) => getTopic(id)?.label || UNCATEGORISED.label;
@@ -86,37 +94,141 @@ function showWarning(message) {
   banner.hidden = !message;
 }
 
+/**
+ * The browser-side copy of the index.
+ *
+ * Building the index server-side means paging the whole project out of Jira —
+ * about five seconds and one full pass — so a reload that re-fetches it is both
+ * slow for the user and the surest way to meet a rate limit. A copy is kept in
+ * localStorage and served immediately; the network call after it is conditional
+ * on the ETag, so an unchanged project answers 304 with no body and no Jira
+ * traffic beyond the check.
+ *
+ * localStorage rather than sessionStorage because the point is to survive a
+ * reload and a new tab. ~600 KB against a ~5 MB budget; a quota failure just
+ * means no cache, never a broken page.
+ */
+function readCachedIndex() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw);
+    if (!cached?.payload?.issues) return null;
+    return { ...cached, ageMs: Date.now() - (cached.storedAt || 0) };
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedIndex(payload, etag) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ storedAt: Date.now(), payload }));
+    if (etag) localStorage.setItem(CACHE_ETAG_KEY, etag);
+  } catch {
+    // Over quota, or storage blocked. The app is fully functional without it.
+  }
+}
+
+function clearCachedIndex() {
+  try {
+    localStorage.removeItem(CACHE_KEY);
+    localStorage.removeItem(CACHE_ETAG_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function applyIndex(data, { fromCache = false, ageMs = 0 } = {}) {
+  state.issues = data.issues || [];
+  state.meta = data;
+  buildLoanIndex();
+
+  const excluded = data.excludedFeatureRequests || 0;
+  showWarning(
+    data.stale
+      ? `Jira could not be reached, so this is the last good copy from ${fmtDateTime(data.fetchedAt)}. ${data.warning || ""}`
+      : data.truncated
+      ? "The project is larger than this page fetches in one go — some older tickets are missing."
+      : ""
+  );
+
+  $("brand-tag").textContent =
+    `${data.project} · ${state.issues.length} production tickets · ${state.loans.size} loans` +
+    (excluded ? ` · ${excluded} feature requests excluded` : "");
+
+  const stamp = fromCache
+    ? `from this browser, ${relative(data.fetchedAt)}`
+    : data.cached
+    ? `cached ${relative(data.fetchedAt)}`
+    : `updated ${fmtDateTime(data.fetchedAt)}`;
+  $("freshness").textContent = stamp;
+  $("freshness").classList.toggle("stale", Boolean(data.stale));
+
+  // "Only mine" is only meaningful once we know who "mine" is.
+  const mineToggle = $("mine-toggle");
+  if (data.me) {
+    mineToggle.hidden = false;
+    mineToggle.textContent = `Only mine`;
+    mineToggle.title = `Show only tickets where CK User is ${data.me}`;
+  } else {
+    mineToggle.hidden = true;
+    state.onlyMine = false;
+  }
+
+  renderAll();
+}
+
 async function loadIndex({ refresh = false } = {}) {
   const button = $("refresh");
   button.disabled = true;
-  $("freshness").innerHTML = '<span class="spinner"></span> loading…';
   showError("");
 
+  // Paint from the local copy first so the page is usable immediately, then
+  // reconcile with the server behind it.
+  const cached = !refresh && readCachedIndex();
+  if (cached) {
+    applyIndex(cached.payload, { fromCache: true, ageMs: cached.ageMs });
+    if (cached.ageMs < CACHE_TTL_MS) {
+      // Fresh enough to trust outright: no request at all.
+      $("freshness").textContent = `from this browser, ${relative(cached.payload.fetchedAt)}`;
+      button.disabled = false;
+      return;
+    }
+  } else {
+    $("freshness").innerHTML = '<span class="spinner"></span> loading…';
+  }
+
   try {
-    const response = await fetch(`${API}/ops-issues${refresh ? "?refresh=1" : ""}`);
+    const etag = (() => {
+      try {
+        return refresh ? null : localStorage.getItem(CACHE_ETAG_KEY);
+      } catch {
+        return null;
+      }
+    })();
+
+    const response = await fetch(`${API}/ops-issues${refresh ? "?refresh=1" : ""}`, {
+      headers: etag ? { "If-None-Match": etag } : {},
+    });
+
+    if (response.status === 304 && cached) {
+      // Nothing changed — keep what we have and just re-stamp it.
+      writeCachedIndex(cached.payload, etag);
+      $("freshness").textContent = `checked just now · unchanged since ${relative(cached.payload.fetchedAt)}`;
+      return;
+    }
+
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
 
-    state.issues = data.issues || [];
-    state.meta = data;
-    buildLoanIndex();
-
-    showWarning(
-      data.stale
-        ? `Jira could not be reached, so this is the last good copy from ${fmtDateTime(data.fetchedAt)}. ${data.warning || ""}`
-        : data.truncated
-        ? "The project is larger than this page fetches in one go — some older tickets are missing."
-        : ""
-    );
-
-    $("brand-tag").textContent = `${data.project} · ${state.issues.length} tickets · ${state.loans.size} loans`;
-    $("freshness").textContent = data.cached
-      ? `cached ${relative(data.fetchedAt)}`
-      : `updated ${fmtDateTime(data.fetchedAt)}`;
-    $("freshness").classList.toggle("stale", Boolean(data.stale));
-
-    renderAll();
+    writeCachedIndex(data, response.headers.get("ETag"));
+    applyIndex(data);
   } catch (error) {
+    if (cached) {
+      // We already showed a usable page; say the refresh failed and leave it.
+      showWarning(`Could not reach Jira just now, so this is the copy stored in this browser. ${error.message}`);
+      return;
+    }
     $("freshness").textContent = "";
     showError(
       /missing ATLASSIAN/i.test(error.message)
@@ -137,7 +249,7 @@ async function loadIndex({ refresh = false } = {}) {
  */
 function buildLoanIndex() {
   const loans = new Map();
-  for (const issue of state.issues) {
+  for (const issue of visibleIssues()) {
     for (const loanKey of issue.loans || []) {
       let loan = loans.get(loanKey);
       if (!loan) {
@@ -160,41 +272,146 @@ function buildLoanIndex() {
     loan.dominantTopic = [...loan.topics.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "other";
   }
   state.loans = loans;
+  buildRelatedGraph();
 }
+
+/**
+ * Which tickets point at which.
+ *
+ * A ticket's own record only knows what *it* mentions. The interesting half is
+ * usually the other direction — "what later tickets came back to this one" — and
+ * that can only be assembled by looking across the whole index, which is
+ * exactly what this page already holds. So both directions get indexed once per
+ * load and every drawer reads from the result.
+ */
+function buildRelatedGraph() {
+  const inbound = new Map();
+  const byKey = new Map();
+
+  for (const issue of state.issues) {
+    byKey.set(issue.key, issue);
+    for (const mentioned of issue.mentions || []) {
+      if (!inbound.has(mentioned)) inbound.set(mentioned, new Set());
+      inbound.get(mentioned).add(issue.key);
+    }
+    // A Jira link is symmetric by nature, so record the reverse side too.
+    for (const link of issue.links || []) {
+      if (!inbound.has(link.key)) inbound.set(link.key, new Set());
+      inbound.get(link.key).add(issue.key);
+    }
+  }
+
+  state.inboundMentions = inbound;
+  state.issuesByKey = byKey;
+}
+
+/**
+ * Everything related to one ticket, de-duplicated across the three ways a
+ * relationship can show up, strongest first.
+ */
+function relatedTo(detail) {
+  const seen = new Map();
+  const add = (key, relation, weight) => {
+    if (!key || key === detail.key) return;
+    const existing = seen.get(key);
+    if (existing && existing.weight >= weight) return;
+    seen.set(key, { key, relation, weight, issue: state.issuesByKey?.get(key) || null });
+  };
+
+  for (const link of detail.links || []) add(link.key, link.relation, 3);
+  for (const key of detail.mentions || []) add(key, "mentioned in this ticket", 2);
+  // Mentions found in the comment thread, which the index cannot see.
+  for (const key of detail.threadMentions || []) add(key, "mentioned in a comment here", 2);
+  for (const key of state.inboundMentions?.get(detail.key) || []) add(key, "mentions this ticket", 1);
+
+  return [...seen.values()].sort(
+    (a, b) => b.weight - a.weight || String(b.issue?.created || "").localeCompare(String(a.issue?.created || ""))
+  );
+}
+
+
 
 // ── KPIs ──────────────────────────────────────────────────────────────
 
 function renderKpis() {
-  const issues = state.issues;
-  const open = issues.filter(isOpen);
-  const resolvedDurations = issues.filter((i) => i.resolved).map(ageDays).filter((d) => d != null);
+  const issues = visibleIssues();
+  const stats = summarise(issues);
   const repeatLoans = [...state.loans.values()].filter((l) => l.issues.length >= 3);
   const withLoan = issues.filter((i) => (i.loans || []).length).length;
+  const mine = state.meta?.me
+    ? issues.filter((i) => i.ckUser?.email && i.ckUser.email === state.meta.me)
+    : [];
 
   const kpis = [
-    { value: issues.length, label: "OPS tickets", note: `${withLoan} name a loan (${Math.round((withLoan / (issues.length || 1)) * 100)}%)` },
-    { value: state.loans.size, label: "Loans affected", note: `${repeatLoans.length} with 3 or more tickets` },
-    { value: open.length, label: "Still open", note: open.length ? `oldest raised ${relative(open.map((i) => i.created).sort()[0])}` : "nothing outstanding" },
-    { value: median(resolvedDurations) ?? "—", label: "Median days to resolve", note: `across ${resolvedDurations.length} resolved` },
-    { value: topKTopic(), label: "Most common issue", note: "by derived topic", small: true },
+    {
+      value: stats.total,
+      label: "Production tickets",
+      note: `${withLoan} name a loan (${pct(withLoan, stats.total)})`,
+    },
+    {
+      value: stats.open,
+      label: "Still open",
+      note: stats.oldestOpen ? `oldest raised ${relative(stats.oldestOpen)}` : "nothing outstanding",
+    },
+    {
+      // The headline "how long does a ticket take" number. Working hours, not
+      // calendar days — see the note at the top of stats.js.
+      value: formatWorkTime(stats.medianSlaMs),
+      label: "Median work time",
+      note: `p90 ${formatWorkTime(stats.p90SlaMs)} · across ${stats.measuredOn} resolved`,
+      small: true,
+    },
+    {
+      value: formatWorkTime(stats.medianFirstResponseMs),
+      label: "Median 1st response",
+      note: "SLA clock, working hours",
+      small: true,
+    },
+    {
+      value: stats.breachRate == null ? "—" : pct(stats.breached, stats.resolved),
+      label: "SLA breached",
+      note: `${stats.breached} of ${stats.resolved} resolved`,
+      small: true,
+    },
+    {
+      value: state.loans.size,
+      label: "Loans affected",
+      note: `${repeatLoans.length} with 3 or more tickets`,
+    },
   ];
+
+  if (state.meta?.me) {
+    const myStats = summarise(mine);
+    kpis.push({
+      value: `${myStats.resolved}/${myStats.total}`,
+      label: "Mine, done / total",
+      note: myStats.measuredOn ? `median ${formatWorkTime(myStats.medianSlaMs)}` : "no resolved tickets yet",
+      small: true,
+    });
+  }
 
   const container = $("kpis");
   container.innerHTML = "";
   for (const kpi of kpis) {
     const card = el("div", "kpi");
     const value = el("div", "value", String(kpi.value));
-    if (kpi.small) value.style.fontSize = "15px";
+    if (kpi.small) value.style.fontSize = "17px";
     card.append(value, el("div", "label", kpi.label), el("div", "note", kpi.note));
     container.append(card);
   }
 }
 
-function topKTopic() {
-  const counts = new Map();
-  for (const issue of state.issues) counts.set(issue.topic, (counts.get(issue.topic) || 0) + 1);
-  const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-  return top ? `${topicLabel(top[0])} (${top[1]})` : "—";
+const pct = (part, whole) => (whole ? `${Math.round((part / whole) * 100)}%` : "—");
+
+/**
+ * The ticket set every view works from. "Only mine" is a global lens rather than
+ * a filter on one table, so turning it on narrows the KPIs, the loan list, the
+ * charts and the throughput table together — otherwise the headline numbers
+ * would describe a different population than the list underneath them.
+ */
+function visibleIssues() {
+  if (!state.onlyMine || !state.meta?.me) return state.issues;
+  return state.issues.filter((issue) => issue.ckUser?.email === state.meta.me);
 }
 
 // ── loans view ────────────────────────────────────────────────────────
@@ -340,7 +557,7 @@ function timelineItem(issue) {
   date.append(el("span", null, `· ${relative(issue.created)}`));
   if (issue.resolved) {
     const days = ageDays(issue);
-    date.append(el("span", null, `· resolved in ${days} day${days === 1 ? "" : "s"}`));
+    date.append(el("span", null, `· closed after ${days} day${days === 1 ? "" : "s"}`));
   }
   card.append(date);
 
@@ -355,6 +572,14 @@ function timelineItem(issue) {
   chips.append(el("span", `chip status-${issue.statusCategory}`, issue.status));
   if (issue.priority && issue.priority !== "None") chips.append(el("span", `chip prio-${issue.priority}`, issue.priority));
   chips.append(el("span", "chip topic", issue.topicLabel));
+  if (issue.ckUser?.name) chips.append(ckUserNode(issue));
+  const work = slaElapsedMs(issue);
+  if (work != null) {
+    const workChip = el("span", "chip", `⏱ ${formatWorkTime(work, { compact: true })}`);
+    if (slaBreached(issue)) workChip.classList.add("breached");
+    workChip.title = workTimeText(issue);
+    chips.append(workChip);
+  }
   for (const component of issue.components || []) chips.append(el("span", "chip", component));
   for (const ref of issue.refs || []) chips.append(el("span", "chip mono", ref));
   card.append(chips);
@@ -433,6 +658,31 @@ function populateFilters() {
   for (const priority of [...new Set(state.issues.map((i) => i.priority))].sort()) {
     prioritySelect.append(new Option(priority, priority));
   }
+
+  // People, ordered by how many tickets they hold rather than alphabetically —
+  // a list of five names is easier to scan by weight.
+  const byVolume = (nameOf) => {
+    const counts = new Map();
+    for (const issue of state.issues) {
+      const name = nameOf(issue);
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  };
+
+  const ckSelect = $("filter-ck");
+  ckSelect.append(new Option("Any CK user", ""));
+  for (const [name, count] of byVolume(ckUserName)) ckSelect.append(new Option(`${name} (${count})`, name));
+
+  const assigneeSelect = $("filter-assignee");
+  assigneeSelect.append(new Option("Any assignee", ""));
+  for (const [name, count] of byVolume(assigneeName)) assigneeSelect.append(new Option(`${name} (${count})`, name));
+
+  const opTypeSelect = $("filter-optype");
+  opTypeSelect.append(new Option("Issue or request", ""));
+  for (const [name] of byVolume((i) => i.opsType || "(not set)")) {
+    if (name !== "(not set)") opTypeSelect.append(new Option(name, name));
+  }
 }
 
 function filteredTickets() {
@@ -441,16 +691,22 @@ function filteredTickets() {
   const topic = $("filter-topic").value;
   const priority = $("filter-priority").value;
   const loanFilter = $("filter-loan").value;
+  const ckFilter = $("filter-ck").value;
+  const assigneeFilter = $("filter-assignee").value;
+  const opTypeFilter = $("filter-optype").value;
 
-  return state.issues.filter((issue) => {
+  return visibleIssues().filter((issue) => {
     if (stateFilter === "open" && !isOpen(issue)) return false;
     if (stateFilter === "done" && isOpen(issue)) return false;
     if (topic && issue.topic !== topic) return false;
     if (priority && issue.priority !== priority) return false;
+    if (ckFilter && ckUserName(issue) !== ckFilter) return false;
+    if (assigneeFilter && assigneeName(issue) !== assigneeFilter) return false;
+    if (opTypeFilter && issue.opsType !== opTypeFilter) return false;
     if (loanFilter === "with" && !(issue.loans || []).length) return false;
     if (loanFilter === "without" && (issue.loans || []).length) return false;
     if (query) {
-      const haystack = `${issue.key} ${issue.summary} ${issue.preview} ${(issue.loans || []).join(" ")} ${(issue.components || []).join(" ")}`.toLowerCase();
+      const haystack = `${issue.key} ${issue.summary} ${issue.preview} ${(issue.loans || []).join(" ")} ${(issue.components || []).join(" ")} ${ckUserName(issue)} ${assigneeName(issue)}`.toLowerCase();
       if (!haystack.includes(query)) return false;
     }
     return true;
@@ -464,6 +720,8 @@ function renderTickets() {
 
   const value = (issue) => {
     if (column === "days") return ageDays(issue) ?? -1;
+    if (column === "work") return slaElapsedMs(issue) ?? -1;
+    if (column === "ck") return ckUserName(issue).toLowerCase();
     if (column === "created") return new Date(issue.created || 0).getTime();
     if (column === "key") return Number(issue.key.split("-")[1]) || 0;
     return String(issue[column] ?? "").toLowerCase();
@@ -501,6 +759,18 @@ function renderTickets() {
 
     tr.append(cell("loans", (issue.loans || []).join(", ") || "—"));
 
+    const ckCell = document.createElement("td");
+    const ck = issue.ckUser?.name;
+    if (ck) {
+      const chip = el("span", "chip person", ck);
+      if (state.meta?.me && issue.ckUser?.email === state.meta.me) chip.classList.add("is-me");
+      ckCell.append(chip);
+    } else {
+      ckCell.className = "date";
+      ckCell.textContent = "—";
+    }
+    tr.append(ckCell);
+
     const statusCell = document.createElement("td");
     statusCell.append(el("span", `chip status-${issue.statusCategory}`, issue.status));
     tr.append(statusCell);
@@ -509,8 +779,18 @@ function renderTickets() {
     priorityCell.append(el("span", `chip prio-${issue.priority}`, issue.priority));
     tr.append(priorityCell);
 
+    // Work time is the SLA clock; waiting is calendar. Both, because they answer
+    // different questions and differ by an order of magnitude on this project.
+    const workCell = cell("date", formatWorkTime(slaElapsedMs(issue)));
+    if (slaBreached(issue)) {
+      workCell.textContent += " ⚠";
+      workCell.title = "SLA breached";
+      workCell.style.color = "var(--urgent)";
+    }
+    tr.append(workCell);
+
     const days = ageDays(issue);
-    tr.append(cell("date", days == null ? "—" : isOpen(issue) ? `${days} open` : String(days)));
+    tr.append(cell("date", days == null ? "—" : isOpen(issue) ? `${days}d open` : `${days}d`));
 
     body.append(tr);
   }
@@ -518,7 +798,7 @@ function renderTickets() {
   if (rows.length > LIMIT) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 8;
+    td.colSpan = 10;
     td.style.cssText = "text-align:center;color:var(--text-muted);font-size:12.5px";
     td.textContent = `Showing the first ${LIMIT} of ${rows.length}. Narrow the filters to see the rest.`;
     tr.append(td);
@@ -528,7 +808,7 @@ function renderTickets() {
   if (!rows.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 8;
+    td.colSpan = 10;
     td.className = "empty-state";
     td.textContent = "No ticket matches these filters.";
     tr.append(td);
@@ -541,6 +821,193 @@ function cell(className, text) {
   if (className) td.className = className;
   td.textContent = text;
   return td;
+}
+
+// ── who's completing what ─────────────────────────────────────────────
+
+/** The window selector, as a ticket predicate. */
+function peopleWindowFilter() {
+  const days = Number($("people-window").value) || 0;
+  if (!days) return () => true;
+  const cutoff = Date.now() - days * 86400000;
+  // Windowed on when the work finished, not when it was raised: the question is
+  // "what did this person get through recently", and an old ticket closed last
+  // week is part of last week's throughput.
+  return (issue) => {
+    const stamp = issue.resolved || issue.updated || issue.created;
+    return stamp ? new Date(stamp).getTime() >= cutoff : false;
+  };
+}
+
+function peopleRows() {
+  const axis = $("people-axis").value;
+  const keyOf = axis === "assignee" ? assigneeName : ckUserName;
+  const scoped = visibleIssues().filter(peopleWindowFilter());
+  const rows = throughputBy(scoped, keyOf);
+
+  const { column, direction } = state.peopleSort;
+  return rows.sort((a, b) => {
+    const [x, y] = [a[column], b[column]];
+    // Nulls last regardless of direction — a person with no measurable time
+    // should not top a "fastest" sort by virtue of having no data.
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (x < y ? -1 : x > y ? 1 : 0) * direction;
+  });
+}
+
+function renderPeople() {
+  const axis = $("people-axis").value;
+  const rows = peopleRows();
+  const body = $("people-body");
+  body.innerHTML = "";
+
+  const scoped = visibleIssues().filter(peopleWindowFilter());
+  const unattributed = scoped.filter((i) => (axis === "assignee" ? !i.assignee : !i.ckUser)).length;
+  $("people-note").textContent =
+    `${scoped.length} tickets · ${rows.length} ${axis === "assignee" ? "assignees" : "CK users"}` +
+    (unattributed ? ` · ${unattributed} with no ${axis === "assignee" ? "assignee" : "CK user"} set` : "") +
+    " · work time is Jira SLA working hours, not calendar time";
+
+  if (!rows.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 9;
+    td.className = "empty-state";
+    td.textContent = "No tickets in this window.";
+    tr.append(td);
+    body.append(tr);
+    return;
+  }
+
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    const isMe = state.meta?.me && row.email === state.meta.me;
+    const isUnset = row.key === UNASSIGNED;
+    if (isMe) tr.classList.add("is-me-row");
+
+    const personCell = document.createElement("td");
+    const chip = el("span", `chip person${isMe ? " is-me" : ""}${isUnset ? " muted" : ""}`, row.key);
+    personCell.append(chip);
+    if (isMe) personCell.append(el("span", "tag-me", "you"));
+    tr.append(personCell);
+
+    tr.append(numCell(row.resolved, "strong"));
+    tr.append(numCell(row.open));
+    tr.append(cell("date", formatWorkTime(row.medianSlaMs)));
+    tr.append(cell("date", formatWorkTime(row.p90SlaMs)));
+    tr.append(cell("date", formatWorkTime(row.medianFirstResponseMs)));
+
+    const breachCell = cell("date", row.breachRate == null ? "—" : `${Math.round(row.breachRate * 100)}%`);
+    if (row.breachRate != null && row.breachRate > 0.25) breachCell.style.color = "var(--urgent)";
+    if (row.breached) breachCell.title = `${row.breached} of ${row.resolved} resolved tickets breached SLA`;
+    tr.append(breachCell);
+
+    tr.append(cell("date", row.medianCalendarMs == null ? "—" : formatDuration(row.medianCalendarMs)));
+    tr.append(numCell(row.distinctLoans));
+
+    // Clicking a person filters the ticket list to them, which is the obvious
+    // next question after reading a row.
+    tr.onclick = () => {
+      switchTab("tickets");
+      $(axis === "assignee" ? "filter-assignee" : "filter-ck").value = row.key;
+      $(axis === "assignee" ? "filter-ck" : "filter-assignee").value = "";
+      renderTickets();
+    };
+    body.append(tr);
+  }
+
+  renderPeopleCharts(rows, axis);
+}
+
+function numCell(value, className) {
+  const td = cell("date", String(value ?? "—"));
+  if (className === "strong") td.style.cssText += ";color:var(--text);font-weight:600";
+  return td;
+}
+
+function renderPeopleCharts(rows, axis) {
+  // Charts read better with the unattributed bucket left out — it is not a
+  // person, and it is usually the largest bar, which flattens everyone else.
+  const named = rows.filter((r) => r.key !== UNASSIGNED);
+
+  drawChart("chart-completed", {
+    type: "bar",
+    data: {
+      labels: named.map((r) => r.key),
+      datasets: [{
+        data: named.map((r) => r.resolved),
+        backgroundColor: named.map((r, i) => (state.meta?.me && r.email === state.meta.me ? "#17875b" : PALETTE[i % PALETTE.length])),
+        borderRadius: 3,
+      }],
+    },
+    options: { indexAxis: "y", scales: { x: { beginAtZero: true }, y: { ticks: { font: { size: 11 } } } } },
+  });
+
+  // A median over one or two tickets is not a rate, it is an anecdote — and a
+  // single 1492-hour ticket rendered next to everyone else flattens the whole
+  // chart to invisible slivers. Same minimum used for the topic cycle chart.
+  const MIN_SAMPLE = 3;
+  const timed = named.filter((r) => r.medianSlaMs != null && r.measuredOn >= MIN_SAMPLE);
+  const omitted = named.filter((r) => r.medianSlaMs != null && r.measuredOn < MIN_SAMPLE);
+  // Say what was left out rather than silently dropping people.
+  const worktimeNote = $("worktime-note");
+  if (worktimeNote) {
+    worktimeNote.textContent = omitted.length
+      ? `${omitted.map((r) => `${r.key} (${r.measuredOn})`).join(", ")} left out — fewer than ${MIN_SAMPLE} resolved tickets.`
+      : "";
+  }
+
+  drawChart("chart-worktime", {
+    type: "bar",
+    data: {
+      labels: timed.map((r) => `${r.key} (n=${r.measuredOn})`),
+      datasets: [{
+        data: timed.map((r) => toHours(r.medianSlaMs)),
+        backgroundColor: timed.map((r, i) => (state.meta?.me && r.email === state.meta.me ? "#17875b" : PALETTE[(i + 4) % PALETTE.length])),
+        borderRadius: 3,
+      }],
+    },
+    options: {
+      indexAxis: "y",
+      plugins: { tooltip: { callbacks: { label: (ctx) => `${ctx.parsed.x} working hours (median)` } } },
+      scales: { x: { beginAtZero: true, title: { display: true, text: "median working hours", color: chartTextColor() } }, y: { ticks: { font: { size: 11 } } } },
+    },
+  });
+
+  // Completed per month, stacked per person.
+  const keyOf = axis === "assignee" ? assigneeName : ckUserName;
+  const months = new Map();
+  const people = new Set();
+  for (const issue of visibleIssues()) {
+    if (!isResolved(issue) || !issue.resolved) continue;
+    const name = keyOf(issue);
+    if (name === UNASSIGNED) continue;
+    people.add(name);
+    const month = issue.resolved.slice(0, 7);
+    if (!months.has(month)) months.set(month, new Map());
+    const bucket = months.get(month);
+    bucket.set(name, (bucket.get(name) || 0) + 1);
+  }
+  const monthKeys = [...months.keys()].sort();
+  const peopleList = [...people];
+  drawChart("chart-people-trend", {
+    type: "bar",
+    data: {
+      labels: monthKeys,
+      datasets: peopleList.map((name, i) => ({
+        label: name,
+        data: monthKeys.map((m) => months.get(m).get(name) || 0),
+        backgroundColor: state.meta?.me && rows.find((r) => r.key === name)?.email === state.meta.me ? "#17875b" : PALETTE[i % PALETTE.length],
+        borderRadius: 2,
+      })),
+    },
+    options: {
+      plugins: { legend: { display: true, position: "bottom", labels: { color: chartTextColor(), boxWidth: 10, font: { size: 11 } } } },
+      scales: { x: { stacked: true, ticks: { maxRotation: 60, font: { size: 10 } } }, y: { stacked: true, beginAtZero: true } },
+    },
+  });
 }
 
 // ── insights view ─────────────────────────────────────────────────────
@@ -756,6 +1223,29 @@ function renderRankList(containerId, rows, emptyMessage) {
   }
 }
 
+/** The CK user as a chip, highlighted when it is the person using the app. */
+function ckUserNode(issue) {
+  const name = issue.ckUser?.name;
+  if (!name) return el("span", null, "— not set —");
+  const chip = el("span", "chip person", name);
+  if (state.meta?.me && issue.ckUser?.email === state.meta.me) {
+    chip.classList.add("is-me");
+    chip.title = "That's you";
+  }
+  return chip;
+}
+
+/** Work time with its goal and breach state, as one readable line. */
+function workTimeText(issue) {
+  const sla = issue?.sla?.resolution;
+  if (!sla || sla.elapsedMs == null) return "—";
+  const parts = [formatWorkTime(sla.elapsedMs)];
+  if (sla.goalMs) parts.push(`of ${formatWorkTime(sla.goalMs)} goal`);
+  if (sla.breached) parts.push("· breached");
+  else if (sla.ongoing) parts.push("· still running");
+  return parts.join(" ");
+}
+
 // ── ticket drawer ─────────────────────────────────────────────────────
 
 async function openTicket(key) {
@@ -854,6 +1344,41 @@ function renderDrawer(detail) {
     body.append(section);
   }
 
+  // Related tickets — the same problem coming back, or a follow-up.
+  const related = relatedTo(detail);
+  if (related.length) {
+    const section = el("div", "section");
+    section.append(el("h3", null, `Related tickets (${related.length})`));
+    const list = el("div", "related-list");
+    for (const item of related) {
+      const button = el("button", "related-row");
+      button.type = "button";
+
+      const top = el("div", "top");
+      top.append(el("span", "tl-key", item.key));
+      if (item.issue) {
+        top.append(el("span", `chip status-${item.issue.statusCategory}`, item.issue.status));
+        if (item.issue.ckUser?.name) top.append(el("span", "chip person", item.issue.ckUser.name));
+      }
+      top.append(el("span", "relation", item.relation));
+      button.append(top);
+
+      // A related ticket outside the current filter (a feature request, say)
+      // has no index record, so say so rather than rendering a bare key.
+      button.append(
+        el("div", "related-summary", item.issue?.summary || "not in the current view — open it to load from Jira")
+      );
+      if (item.issue?.created) {
+        button.append(el("div", "related-meta", `raised ${fmtDate(item.issue.created)} · ${relative(item.issue.created)}`));
+      }
+
+      button.onclick = () => openTicket(item.key);
+      list.append(button);
+    }
+    section.append(list);
+    body.append(section);
+  }
+
   // Facts.
   const facts = el("div", "section");
   facts.append(el("h3", null, "Detail"));
@@ -863,11 +1388,33 @@ function renderDrawer(detail) {
     fact.append(el("div", "k", label), el("div", "v", value || "—"));
     grid.append(fact);
   };
+  const addFactNode = (label, node) => {
+    const fact = el("div", "fact");
+    const value = el("div", "v");
+    value.append(node);
+    fact.append(el("div", "k", label), value);
+    grid.append(fact);
+  };
   addFact("Raised", `${fmtDate(detail.created)} · ${relative(detail.created)}`);
-  addFact(detail.resolved ? "Resolved" : "Last updated", detail.resolved ? `${fmtDate(detail.resolved)} · took ${ageDays(detail)} days` : `${fmtDate(detail.updated)} · open ${ageDays(detail)} days`);
-  addFact("Reported by", detail.reporter);
-  addFact("Assigned to", detail.assignee);
-  addFact("Type", detail.type);
+  addFact(
+    detail.resolved ? "Resolved" : "Last updated",
+    detail.resolved
+      ? `${fmtDate(detail.resolved)} · ${ageDays(detail)} days later`
+      : `${fmtDate(detail.updated)} · open ${ageDays(detail)} days`
+  );
+  addFact("Reported by", detail.reporter?.name);
+  addFact("Assignee (F2F)", detail.assignee?.name);
+  // The field that says which of the CK team actually picked this up. The Jira
+  // login is a shared desk account, so this — not the assignee — is who worked it.
+  addFactNode("CK user", ckUserNode(detail));
+  addFact("Work time (SLA)", workTimeText(detail));
+  addFact("First response", formatWorkTime(firstResponseMs(detail)));
+  addFact("Request type", detail.requestType);
+  addFact("Issue or request", detail.opsType);
+  if (detail.severity) addFact("Severity", detail.severity);
+  if (detail.urgency) addFact("Urgency", detail.urgency);
+  if (detail.ckTimeSpent) addFact("CK time logged", String(detail.ckTimeSpent));
+  if (detail.f2fTimeSpent) addFact("F2F time logged", String(detail.f2fTimeSpent));
   if ((detail.labels || []).length) addFact("Labels", detail.labels.join(", "));
   facts.append(grid);
   body.append(facts);
@@ -922,7 +1469,8 @@ function summarySection(heading, summary, detail, kind) {
   section.append(title);
 
   const source = summary.source;
-  const box = el("div", `summary-box ${source === "authored" ? "authored" : source === "none" ? "empty" : "extracted"}`);
+  const deliberate = source === "authored" || source === "resolution-field";
+  const box = el("div", `summary-box ${deliberate ? "authored" : source === "none" ? "empty" : "extracted"}`);
   box.textContent =
     summary.text ||
     (kind === "fix"
@@ -930,11 +1478,14 @@ function summarySection(heading, summary, detail, kind) {
       : "No description was given.");
   section.append(box);
 
-  const provenance = el("div", `provenance ${source === "authored" ? "authored" : source === "none" ? "none" : "extracted"}`);
+  const provenance = el("div", `provenance ${deliberate ? "authored" : source === "none" ? "none" : "extracted"}`);
   provenance.append(el("span", "dot"));
   const describe = {
     authored: `Written by ${summary.author || "someone"}${summary.created ? ` · ${fmtDate(summary.created)}` : ""}`,
     extracted: `Pulled from ${summary.author ? `${summary.author}'s ` : "a "}comment${summary.created ? ` of ${fmtDate(summary.created)}` : ""} — not written for this purpose${summary.confidence === "low" ? ", and a weak match" : ""}`,
+    // Jira's own field, filled in by a person on purpose. Ranks with an
+    // authored note rather than with a scraped comment.
+    "resolution-field": "From the ticket's Resolution Comments field in Jira",
     description: "Taken from the reporter's own description",
     summary: "Taken from the ticket title",
     none: "Not recorded",
@@ -943,11 +1494,21 @@ function summarySection(heading, summary, detail, kind) {
   section.append(provenance);
 
   const editLabel =
-    summary.source === "authored"
+    deliberate
       ? "Rewrite"
       : kind === "fix"
       ? "Write the fix in your own words"
       : "Summarise it yourself";
+  // If Jira's Resolution Comments field was filled in but only with a sign-off,
+  // say so. Otherwise the field looks untouched and somebody fills it in twice.
+  if (kind === "fix" && summary.fieldNote) {
+    const note = el("div", "field-note");
+    note.append(el("span", "k", "Resolution Comments in Jira says:"));
+    note.append(el("span", "v", `“${summary.fieldNote}”`));
+    note.append(el("span", "why", "read as a status update rather than a fix"));
+    section.append(note);
+  }
+
   const editButton = el("button", "icon-button", editLabel);
   editButton.style.marginTop = "8px";
   editButton.onclick = () => showNoteEditor(section, editButton, detail, kind, summary);
@@ -1011,7 +1572,7 @@ function showNoteEditor(section, trigger, detail, kind, summary) {
 
 // ── tabs, theme, wiring ───────────────────────────────────────────────
 
-const TABS = ["loans", "tickets", "insights"];
+const TABS = ["loans", "tickets", "people", "insights"];
 
 function switchTab(name) {
   for (const tab of TABS) {
@@ -1020,6 +1581,7 @@ function switchTab(name) {
   }
   if (name === "insights") renderInsights();
   if (name === "tickets") renderTickets();
+  if (name === "people") renderPeople();
   history.replaceState(null, "", `#${name}`);
 }
 
@@ -1028,7 +1590,50 @@ function renderAll() {
   renderLoanList();
   renderLoanDetail();
   if (!$("view-tickets").hidden) renderTickets();
+  if (!$("view-people").hidden) renderPeople();
   if (!$("view-insights").hidden) renderInsights();
+}
+
+/**
+ * Back to the start, as though the page had just been opened: every filter
+ * cleared, nothing selected, first tab, scrolled to the top. Deliberately does
+ * NOT re-fetch — the data is already correct, and clicking home should feel
+ * instant rather than costing another pass over the project. Refresh is the
+ * control for "get me new data".
+ */
+function goHome() {
+  closeDrawer();
+  state.selectedLoan = null;
+  state.onlyMine = false;
+  state.ticketSort = { column: "created", direction: -1 };
+  state.peopleSort = { column: "resolved", direction: -1 };
+
+  $("mine-toggle").setAttribute("aria-pressed", "false");
+  $("loan-search").value = "";
+  $("loan-sort").value = "count";
+  $("ticket-search").value = "";
+  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee", "filter-optype"]) {
+    const field = $(id);
+    if (field) field.value = "";
+  }
+  $("people-axis").value = "ck";
+  $("people-window").value = "0";
+
+  showWarning("");
+  buildLoanIndex();
+  switchTab("loans");
+  renderAll();
+  history.replaceState(null, "", location.pathname);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function clearTicketFilters() {
+  $("ticket-search").value = "";
+  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee", "filter-optype"]) {
+    const field = $(id);
+    if (field) field.value = "";
+  }
+  renderTickets();
 }
 
 function applyTheme(theme) {
@@ -1053,10 +1658,38 @@ function init() {
   const fromHash = location.hash.slice(1);
   if (TABS.includes(fromHash)) switchTab(fromHash);
 
+  $("home").onclick = goHome;
+
   $("refresh").onclick = () => {
     state.detailCache.clear();
+    clearCachedIndex();
     loadIndex({ refresh: true });
   };
+
+  $("mine-toggle").onclick = () => {
+    state.onlyMine = !state.onlyMine;
+    $("mine-toggle").setAttribute("aria-pressed", String(state.onlyMine));
+    buildLoanIndex();
+    state.selectedLoan = null;
+    renderAll();
+  };
+
+  $("filters-clear").onclick = clearTicketFilters;
+  $("people-axis").onchange = renderPeople;
+  $("people-window").onchange = renderPeople;
+
+  for (const th of document.querySelectorAll("#people-table th[data-people-sort]")) {
+    th.onclick = () => {
+      const column = th.dataset.peopleSort;
+      const sort = state.peopleSort;
+      // Counts and loans read best high-first; durations and breach rates read
+      // best low-first, since "fast" is the interesting end.
+      const defaultDirection = ["resolved", "open", "distinctLoans"].includes(column) ? -1 : 1;
+      sort.direction = sort.column === column ? -sort.direction : defaultDirection;
+      sort.column = column;
+      renderPeople();
+    };
+  }
 
   $("theme-toggle").onclick = () => {
     const current = document.documentElement.dataset.theme;
@@ -1068,9 +1701,14 @@ function init() {
   $("loan-sort").onchange = renderLoanList;
 
   $("ticket-search").oninput = debounce(renderTickets, 140);
-  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan"]) $(id).onchange = renderTickets;
+  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee", "filter-optype"]) {
+    $(id).onchange = renderTickets;
+  }
 
-  for (const th of document.querySelectorAll("th.sortable")) {
+  // Scoped away from the people table: those headers are also .sortable, and
+  // assigning onclick twice to one element silently keeps only the last
+  // handler — which had the ticket sorter swallowing every people-table click.
+  for (const th of document.querySelectorAll("#ticket-table th.sortable")) {
     th.onclick = () => {
       const column = th.dataset.sort;
       const sort = state.ticketSort;

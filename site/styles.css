@@ -523,3 +523,86 @@ td.loans { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
   .loan-list { max-height: 320px; }
   .timeline { max-height: none; }
 }
+
+/* ── people & attribution ────────────────────────────────────────────── */
+
+/* The brand doubles as "back to the start", so it has to look pressable
+   without becoming a button-shaped thing in the middle of a masthead. */
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-right: auto;
+  background: none;
+  border: 0;
+  padding: 4px 8px 4px 0;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+.brand:hover h1 { color: var(--accent-text); }
+.brand:hover .tag { color: var(--text-muted); }
+.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.icon-button.toggle[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.chip.person { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); }
+.chip.person.is-me { background: var(--done-soft); border-color: var(--done); color: var(--done); font-weight: 600; }
+.chip.person.muted { color: var(--text-faint); font-style: italic; border-style: dashed; }
+.chip.breached { background: var(--urgent-soft); color: var(--urgent); border-color: transparent; }
+
+.tag-me {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--done);
+  margin-left: 6px;
+  font-weight: 600;
+}
+
+/* Your own row, so you can find yourself in the table at a glance. */
+tbody tr.is-me-row { box-shadow: inset 3px 0 0 var(--done); }
+tbody tr.is-me-row td:first-child { padding-left: 15px; }
+
+#people-table td { white-space: nowrap; }
+#people-table td:first-child { white-space: normal; }
+
+/* ── related tickets ─────────────────────────────────────────────────── */
+
+.related-list { display: flex; flex-direction: column; gap: 6px; }
+
+.related-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+}
+.related-row:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+.related-row .top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.related-row .relation { font-size: 11px; color: var(--text-faint); margin-left: auto; font-style: italic; }
+.related-row .related-summary { font-size: 13px; margin-top: 4px; }
+.related-row .related-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; }
+
+/* A Resolution Comments field that held only a sign-off: shown, but not dressed
+   up as the fix. */
+.field-note {
+  margin-top: 8px;
+  padding: 7px 10px;
+  background: var(--progress-soft);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: baseline;
+}
+.field-note .k { color: var(--progress); font-weight: 600; }
+.field-note .v { color: var(--text); }
+.field-note .why { color: var(--text-faint); font-style: italic; }

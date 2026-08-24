@@ -11,6 +11,8 @@ import { extractRefs, extractLoanRefs, normaliseLoanQuery, canonicalRef } from "
 import { fieldToText, truncate, firstSentences } from "../site/lib/text.js";
 import { classify } from "../site/lib/taxonomy.js";
 import { buildDigest, scoreComment, FIX_NOTE_MARKER } from "../site/lib/digest.js";
+import { extractIssueKeys } from "../site/lib/refs.js";
+import { formatDuration, formatWorkTime, throughputBy, ckUserName, summarise, UNASSIGNED } from "../site/lib/stats.js";
 
 let passed = 0;
 let failed = 0;
@@ -264,6 +266,115 @@ test("OPSTracker's own notes never compete for the extracted slot", () => {
   });
   assert.equal(digest.fix.source, "authored");
   assert.equal(digest.thread.length, 0, "the note should be filtered out of the thread");
+});
+
+
+test("Jira's Resolution Comments field is used as the fix when it says something", () => {
+  // Real entries from the field on this project.
+  for (const text of [
+    "Duplicate app deleted",
+    "1951 now funded",
+    "Dummy funds now removed",
+    "Figures amended as requested",
+    "The issue is caused by the fact there are two redemption statements for the same loan.",
+  ]) {
+    const digest = buildDigest({ resolutionComments: text, comments: [] });
+    assert.equal(digest.fix.source, "resolution-field", `"${text}" was not used`);
+    assert.equal(digest.fix.text, text);
+  }
+});
+
+test("a sign-off typed into the Resolution Comments field is not passed off as the fix", () => {
+  // These are real field contents too. The field is the right place for a fix,
+  // but what is in it is sometimes a status update — and calling that "the fix"
+  // is the exact failure the comment scoring exists to prevent.
+  for (const text of ["Closed as complete after Finance review", "closed as confirmed updated", "closed as per updates"]) {
+    const digest = buildDigest({
+      resolutionComments: text,
+      comments: [comment("ck", "I have amended the LPT records and cleared the May MAF fee.")],
+      assigneeId: "ck",
+    });
+    assert.equal(digest.fix.source, "extracted", `"${text}" was accepted as a fix`);
+    // …and it is still reported, so nobody thinks the field was left blank.
+    assert.equal(digest.fix.fieldNote, text);
+  }
+});
+
+test("an authored note still outranks the Jira field", () => {
+  const digest = buildDigest({
+    resolutionComments: "Duplicate app deleted",
+    comments: [comment("me", `${FIX_NOTE_MARKER} Two apps existed for one loan; the later one was deleted.`)],
+  });
+  assert.equal(digest.fix.source, "authored");
+});
+
+console.log("\nrefs — sibling ticket references");
+
+test("OPS keys are found in prose, in every spelling used here", () => {
+  // "This loan is corrected, as a part of OPS - 806" is a real comment.
+  assert.deepEqual(extractIssueKeys("as a part of OPS - 806", "OPS"), ["OPS-806"]);
+  assert.deepEqual(extractIssueKeys("see OPS-124, ops812 and OPS 999", "OPS"), ["OPS-124", "OPS-812", "OPS-999"]);
+});
+
+test("a ticket is never related to itself", () => {
+  assert.deepEqual(extractIssueKeys("OPS-884 duplicates OPS-884 and OPS-671", "OPS", "OPS-884"), ["OPS-671"]);
+});
+
+test("loan and application references are not mistaken for ticket keys", () => {
+  assert.deepEqual(extractIssueKeys("LAI-1234 on APP-99", "OPS"), []);
+});
+
+console.log("\nstats — throughput and durations");
+
+test("SLA time prints in hours the way Jira does, calendar time in days", () => {
+  // 89,618,383 ms is what Jira reports as "24h 53m" on OPS-884. Printing that
+  // as "1d" would read as a calendar day, which it is not.
+  assert.equal(formatWorkTime(89618383), "24h 53m");
+  assert.equal(formatWorkTime(288000000), "80h");
+  assert.equal(formatDuration(89618383), "1d");
+  assert.equal(formatWorkTime(1080000), "18m");
+});
+
+test("throughput groups by CK user, because the Jira login is shared", () => {
+  const issues = [
+    { key: "A", statusCategory: "done", ckUser: { name: "Md Sameer", email: "me@x" }, topic: "t", loans: ["LAI-1"], created: "2026-01-01T00:00:00Z", resolved: "2026-01-02T00:00:00Z", sla: { resolution: { elapsedMs: 3600000 }, firstResponse: { elapsedMs: 600000 } } },
+    { key: "B", statusCategory: "done", ckUser: { name: "Md Sameer", email: "me@x" }, topic: "t", loans: [], created: "2026-01-01T00:00:00Z", resolved: "2026-01-03T00:00:00Z", sla: { resolution: { elapsedMs: 7200000, breached: true }, firstResponse: {} } },
+    { key: "C", statusCategory: "new", ckUser: null, topic: "t", loans: [], created: "2026-01-01T00:00:00Z", sla: { resolution: { elapsedMs: 999, ongoing: true } } },
+  ];
+  const rows = throughputBy(issues, ckUserName);
+  const mine = rows.find((r) => r.key === "Md Sameer");
+  assert.equal(mine.resolved, 2);
+  assert.equal(mine.medianSlaMs, 5400000);
+  assert.equal(mine.breached, 1);
+  assert.equal(mine.distinctLoans, 1);
+
+  // The unattributed ticket is its own named bucket, not dropped — hiding it
+  // would flatter everybody's numbers.
+  const unset = rows.find((r) => r.key === UNASSIGNED);
+  assert.equal(unset.total, 1);
+  assert.equal(unset.open, 1);
+});
+
+test("an open ticket's running clock never counts toward a median", () => {
+  const issues = [
+    { key: "A", statusCategory: "done", ckUser: { name: "X" }, topic: "t", loans: [], created: "2026-01-01T00:00:00Z", resolved: "2026-01-02T00:00:00Z", sla: { resolution: { elapsedMs: 3600000 }, firstResponse: {} } },
+    { key: "B", statusCategory: "new", ckUser: { name: "X" }, topic: "t", loans: [], created: "2020-01-01T00:00:00Z", sla: { resolution: { elapsedMs: 999999999, ongoing: true }, firstResponse: {} } },
+  ];
+  const row = throughputBy(issues, ckUserName)[0];
+  assert.equal(row.medianSlaMs, 3600000, "the open ticket dragged the median");
+  assert.equal(row.measuredOn, 1);
+});
+
+test("summarise counts breaches against resolved tickets only", () => {
+  const stats = summarise([
+    { statusCategory: "done", created: "2026-01-01T00:00:00Z", resolved: "2026-01-02T00:00:00Z", loans: [], sla: { resolution: { elapsedMs: 100, breached: true }, firstResponse: {} } },
+    { statusCategory: "done", created: "2026-01-01T00:00:00Z", resolved: "2026-01-02T00:00:00Z", loans: [], sla: { resolution: { elapsedMs: 200 }, firstResponse: {} } },
+    { statusCategory: "new", created: "2026-01-01T00:00:00Z", loans: [], sla: { resolution: { elapsedMs: 300 }, firstResponse: {} } },
+  ]);
+  assert.equal(stats.resolved, 2);
+  assert.equal(stats.open, 1);
+  assert.equal(stats.breached, 1);
+  assert.equal(stats.breachRate, 0.5);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

@@ -12,11 +12,12 @@
 
 <header class="masthead">
   <div class="masthead-row">
-    <div class="brand">
+    <button class="brand" id="home" title="Back to the start — clears every filter and selection">
       <h1>OPSTracker</h1>
       <span class="tag" id="brand-tag">loans &amp; operational issues</span>
-    </div>
+    </button>
     <div class="masthead-actions">
+      <button class="icon-button toggle" id="mine-toggle" aria-pressed="false" hidden>Only mine</button>
       <span class="freshness" id="freshness"></span>
       <button class="icon-button" id="refresh" title="Re-fetch from Jira, bypassing the cache">↻ Refresh</button>
       <button class="icon-button" id="theme-toggle" title="Switch light / dark" aria-label="Switch light or dark theme">◐</button>
@@ -29,6 +30,7 @@
 <nav class="tabs" role="tablist">
   <button class="tab" role="tab" id="tab-loans" aria-selected="true" aria-controls="view-loans">Loans</button>
   <button class="tab" role="tab" id="tab-tickets" aria-selected="false" aria-controls="view-tickets">All tickets</button>
+  <button class="tab" role="tab" id="tab-people" aria-selected="false" aria-controls="view-people">Who's completing what</button>
   <button class="tab" role="tab" id="tab-insights" aria-selected="false" aria-controls="view-insights">Recurring errors</button>
 </nav>
 
@@ -78,11 +80,15 @@
           </select>
           <select class="field" id="filter-topic" aria-label="Filter by topic"></select>
           <select class="field" id="filter-priority" aria-label="Filter by priority"></select>
+          <select class="field" id="filter-ck" aria-label="Filter by CK user"></select>
+          <select class="field" id="filter-assignee" aria-label="Filter by assignee"></select>
+          <select class="field" id="filter-optype" aria-label="Filter by issue or service request"></select>
           <select class="field" id="filter-loan" aria-label="Filter by loan linkage">
             <option value="">Any ticket</option>
             <option value="with">Names a loan</option>
             <option value="without">No loan named</option>
           </select>
+          <button class="icon-button" id="filters-clear">Clear</button>
         </div>
       </div>
       <div class="panel-head" style="padding-top:0;border-bottom:1px solid var(--border)">
@@ -97,13 +103,77 @@
               <th>Summary</th>
               <th class="sortable" data-sort="topicLabel">Topic</th>
               <th>Loans</th>
+              <th class="sortable" data-sort="ck">CK user</th>
               <th class="sortable" data-sort="status">Status</th>
               <th class="sortable" data-sort="priority">Priority</th>
-              <th class="sortable" data-sort="days">Days</th>
+              <th class="sortable" data-sort="work">Work time</th>
+              <th class="sortable" data-sort="days">Waiting</th>
             </tr>
           </thead>
           <tbody id="ticket-body"></tbody>
         </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Who's completing what ─────────────────────────────────────── -->
+  <section class="view" id="view-people" role="tabpanel" aria-labelledby="tab-people" hidden>
+    <div class="panel" style="margin-bottom:16px">
+      <div class="panel-head">
+        <h2>Throughput</h2>
+        <span class="spacer"></span>
+        <div class="filters">
+          <select class="field" id="people-axis" aria-label="Group by" style="width:auto">
+            <option value="ck">By CK user</option>
+            <option value="assignee">By Jira assignee</option>
+          </select>
+          <select class="field" id="people-window" aria-label="Time window" style="width:auto">
+            <option value="0">All time</option>
+            <option value="30">Last 30 days</option>
+            <option value="90">Last 90 days</option>
+            <option value="365">Last 12 months</option>
+          </select>
+        </div>
+      </div>
+      <div class="panel-head" style="padding-top:0;border-bottom:1px solid var(--border)">
+        <span class="freshness" id="people-note"></span>
+      </div>
+      <div class="table-scroll">
+        <table id="people-table">
+          <thead>
+            <tr>
+              <th>Person</th>
+              <th class="sortable" data-people-sort="resolved">Completed</th>
+              <th class="sortable" data-people-sort="open">Open</th>
+              <th class="sortable" data-people-sort="medianSlaMs">Median work time</th>
+              <th class="sortable" data-people-sort="p90SlaMs">p90 work time</th>
+              <th class="sortable" data-people-sort="medianFirstResponseMs">Median 1st response</th>
+              <th class="sortable" data-people-sort="breachRate">SLA breached</th>
+              <th class="sortable" data-people-sort="medianCalendarMs">Median wait</th>
+              <th class="sortable" data-people-sort="distinctLoans">Loans</th>
+            </tr>
+          </thead>
+          <tbody id="people-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="chart-grid">
+      <div class="chart-panel">
+        <h3>Tickets completed</h3>
+        <div class="sub">Resolved tickets per person in the selected window.</div>
+        <div class="chart-box"><canvas id="chart-completed"></canvas></div>
+      </div>
+      <div class="chart-panel">
+        <h3>Median work time per ticket</h3>
+        <div class="sub">Jira SLA working hours from raised to resolved — not calendar time. Lower is faster.</div>
+        <div class="chart-box"><canvas id="chart-worktime"></canvas></div>
+        <div class="sub" id="worktime-note" style="margin:8px 0 0"></div>
+      </div>
+      <div class="chart-panel">
+        <h3>Completed per month</h3>
+        <div class="sub">Who closed what, over time.</div>
+        <div class="chart-box"><canvas id="chart-people-trend"></canvas></div>
       </div>
     </div>
   </section>

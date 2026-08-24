@@ -97,3 +97,28 @@ export function refNumber(canonical) {
   const idx = canonical.indexOf("-");
   return idx === -1 ? canonical : canonical.slice(idx + 1);
 }
+
+/**
+ * Other tickets in the same project mentioned in a blob of text.
+ *
+ * Tickets cross-reference each other constantly here, and always in prose —
+ * "This loan is corrected, as a part of OPS - 806" — so the separator has to be
+ * as forgiving as the loan one: "OPS-806", "OPS 806", "OPS - 806", "ops806".
+ *
+ * `exclude` drops the ticket's own key, which otherwise shows up as related to
+ * itself the moment someone writes their own reference number in a comment.
+ */
+export function extractIssueKeys(text, projectKey = "OPS", exclude = null) {
+  if (!text) return [];
+  const pattern = new RegExp(String.raw`\b(${projectKey})\s?[-–—]?\s?(\d{1,7})\b`, "gi");
+  const excludeUpper = exclude ? String(exclude).toUpperCase() : null;
+  const out = [];
+  const seen = new Set();
+  for (const match of String(text).matchAll(pattern)) {
+    const key = `${match[1].toUpperCase()}-${Number(match[2])}`;
+    if (key === excludeUpper || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
