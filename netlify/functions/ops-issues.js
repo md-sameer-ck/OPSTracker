@@ -23,7 +23,7 @@
 // exists for exactly that case, and asks Jira directly.
 
 import { getCredentials, json, preflight, scopedJql, searchAll, PROJECT_KEY } from "./_jira.js";
-import { BASE_FIELDS, FEATURE_REQUEST_TYPE, PRODUCTION_REQUEST_TYPE, normaliseIssue } from "./_fields.js";
+import { BASE_FIELDS, FEATURE_REQUEST_TYPE, PRODUCTION_REQUEST_TYPE, SERVICE_REQUEST_TYPE, normaliseIssue } from "./_fields.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 let cache = { key: null, at: 0, payload: null, etag: null };
@@ -46,6 +46,8 @@ export const handler = async (event) => {
   // Feature requests are planned work, not production incidents, and are left
   // out unless asked for — see PRODUCTION_REQUEST_TYPE in _fields.js.
   const includeFeatureRequests = params.featureRequests === "1";
+  // Service requests are asks, not faults — see SERVICE_REQUEST_TYPE.
+  const includeServiceRequests = params.serviceRequests === "1";
 
   let jql;
   try {
@@ -54,7 +56,7 @@ export const handler = async (event) => {
     return json(error.statusCode || 400, { error: error.message });
   }
 
-  const cacheKey = `${jql}::${includeFeatureRequests}`;
+  const cacheKey = `${jql}::${includeFeatureRequests}::${includeServiceRequests}`;
   const ifNoneMatch = event.headers?.["if-none-match"] || event.headers?.["If-None-Match"];
 
   if (!wantsRefresh && cache.payload && cache.key === cacheKey && Date.now() - cache.at < CACHE_TTL_MS) {
@@ -66,7 +68,9 @@ export const handler = async (event) => {
 
   const issues = [];
   const requestTypeCounts = {};
-  let excluded = 0;
+  const opsTypeCounts = {};
+  let excludedFeatures = 0;
+  let excludedServiceRequests = 0;
 
   try {
     const { truncated, total } = await searchAll({
@@ -78,8 +82,15 @@ export const handler = async (event) => {
           const record = normaliseIssue(raw);
           const type = record.requestType || "(none)";
           requestTypeCounts[type] = (requestTypeCounts[type] || 0) + 1;
+          const opsType = record.opsType || "(not set)";
+          opsTypeCounts[opsType] = (opsTypeCounts[opsType] || 0) + 1;
+
           if (!includeFeatureRequests && record.requestType === FEATURE_REQUEST_TYPE) {
-            excluded += 1;
+            excludedFeatures += 1;
+            continue;
+          }
+          if (!includeServiceRequests && record.opsType === SERVICE_REQUEST_TYPE) {
+            excludedServiceRequests += 1;
             continue;
           }
           issues.push(record);
@@ -93,11 +104,14 @@ export const handler = async (event) => {
       jql,
       total: issues.length,
       fetchedFromJira: total,
-      excludedFeatureRequests: excluded,
+      excludedFeatureRequests: excludedFeatures,
+      excludedServiceRequests,
       requestTypeCounts,
+      opsTypeCounts,
       productionRequestType: PRODUCTION_REQUEST_TYPE,
       featureRequestType: FEATURE_REQUEST_TYPE,
       includeFeatureRequests,
+      includeServiceRequests,
       // Who "mine" means. The Jira login is a shared desk account, so the person
       // using the dashboard has to be named separately — see CK_ME_EMAIL.
       me: process.env.CK_ME_EMAIL || null,

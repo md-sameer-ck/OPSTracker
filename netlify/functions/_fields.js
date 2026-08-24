@@ -36,6 +36,19 @@ export const FIELD = {
 export const PRODUCTION_REQUEST_TYPE = "Salesforce Issues & Service Requests";
 export const FEATURE_REQUEST_TYPE = "Salesforce Feature Request";
 
+// The "Type" field sub-classifies a ticket as an Issue or a Service Request —
+// something broke, versus somebody asked for something. Only faults are wanted,
+// so Service Requests are excluded.
+//
+// Tickets where Type was never set are KEPT, deliberately. The field is filled
+// in about as reliably as CK User: 168 of 769 are blank, and they are not just
+// old ones — the newest ticket in the project is blank, and the blanks include
+// plainly production faults ("Duplicate LAI for Snowball", "error uploading the
+// bank interest file"). Treating blank as "not an issue" would silently drop
+// those, which is worse than including the occasional unlabelled request.
+export const SERVICE_REQUEST_TYPE = "Service Request";
+export const ISSUE_TYPE = "Issue";
+
 /** Fields every endpoint asks Jira for. */
 export const BASE_FIELDS = [
   "summary", "description", "status", "issuetype", "priority", "labels",

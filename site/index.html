@@ -82,7 +82,6 @@
           <select class="field" id="filter-priority" aria-label="Filter by priority"></select>
           <select class="field" id="filter-ck" aria-label="Filter by CK user"></select>
           <select class="field" id="filter-assignee" aria-label="Filter by assignee"></select>
-          <select class="field" id="filter-optype" aria-label="Filter by issue or service request"></select>
           <select class="field" id="filter-loan" aria-label="Filter by loan linkage">
             <option value="">Any ticket</option>
             <option value="with">Names a loan</option>
@@ -219,6 +218,9 @@
     </div>
   </section>
 </main>
+
+<div class="scrim" id="chart-scrim" hidden></div>
+<div class="chart-modal" id="chart-modal" role="dialog" aria-modal="true" hidden></div>
 
 <div class="scrim" id="scrim" hidden></div>
 <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden></aside>

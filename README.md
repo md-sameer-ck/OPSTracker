@@ -48,6 +48,11 @@ own Components for comparison.
 
 **Only mine.** One toggle narrows every number on every tab to your tickets.
 
+**Any chart, bigger.** Click a chart's title to open it full-screen with every
+label spelled out — click outside or press Escape to come back. The ranked lists
+open the same way, showing the whole list rather than the top dozen the card has
+room for.
+
 Clicking **OPSTracker** at the top left returns the page to how it looks on a
 fresh load — every filter cleared, nothing selected, back on Loans. It does not
 re-fetch: the data is already right, and going home should be instant. Refresh
@@ -55,7 +60,10 @@ is the control for new data.
 
 ## Only production issues
 
-This desk takes two kinds of request, and the dashboard only ever counts one:
+Two fields decide what counts, and the dashboard applies both everywhere — KPIs,
+loan timelines, throughput and every chart:
+
+**Request type** — which portal form was used.
 
 | Request type | Tickets | Included |
 |---|---|---|
@@ -64,13 +72,32 @@ This desk takes two kinds of request, and the dashboard only ever counts one:
 
 Feature requests are planned work. Mixing them into "how long does a ticket
 take" or "how many are still open" makes both numbers lie — a feature request
-parked open for two years is not an outstanding production incident. They are
-filtered out of everything: the KPIs, the loan timelines, the throughput table
-and every chart. The masthead says how many were excluded so the number is never
-silently different from Jira's own count.
+parked open for two years is not an outstanding production incident.
 
-The server accepts `?featureRequests=1` if you ever need them, but nothing in
-the UI turns it on.
+**Type** — whether something broke, or somebody asked for something.
+
+| Type | Tickets | Included |
+|---|---|---|
+| Issue | 416 | yes |
+| *(not set)* | 168 | yes — see below |
+| Service Request | 185 | no |
+
+Service requests are asks, not faults: *"Mary Allen Access to CLS"*, *"CLS report
+needed for FCA reporting"*, *"ISA application form"*. They are excluded.
+
+Tickets where Type was never filled in are **kept**, deliberately. That field is
+about as reliably populated as CK User, and the blanks are not simply old ones —
+the newest ticket in the project is blank, and the blanks include plainly
+production faults (*"Duplicate LAI for Snowball"*, *"error uploading the bank
+interest file"*). Treating blank as "not an issue" would silently drop 168 real
+issues, which is worse than including the occasional unlabelled request.
+
+That leaves **584 production issues**. The masthead always names what was
+excluded, so this figure can be reconciled against Jira's own rather than
+quietly disagreeing with it.
+
+Both exclusions have a server-side escape hatch — `?featureRequests=1` and
+`?serviceRequests=1` — and neither is exposed in the UI.
 
 ## Setup
 
@@ -361,6 +388,9 @@ unchanged*.
 - **CK User is only set on 40% of tickets**, so the "— not set —" row is the
   biggest one in the throughput table. That is a data-entry gap, not a bug, and
   it is shown rather than hidden.
+- **Type is unset on 168 tickets**, which are kept as issues. If a service
+  request is sitting in that group it is being counted as a production issue;
+  filling the field in on new tickets is the only fix.
 - **Throughput measures closure, not effort.** It counts tickets a person closed
   and the SLA time those took. The CK Time Spent and F2F Time Spent fields exist
   in Jira but are empty across the project, so nothing here uses them; if the

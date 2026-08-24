@@ -606,3 +606,53 @@ tbody tr.is-me-row td:first-child { padding-left: 15px; }
 .field-note .k { color: var(--progress); font-weight: 600; }
 .field-note .v { color: var(--text); }
 .field-note .why { color: var(--text-faint); font-style: italic; }
+
+/* ── chart zoom ──────────────────────────────────────────────────────── */
+
+/* A chart title that opens the chart bigger. It has to read as pressable
+   without turning a card heading into a button. */
+.chart-panel h3.zoomable { cursor: zoom-in; display: inline-flex; align-items: center; gap: 6px; }
+.chart-panel h3.zoomable::after {
+  content: "⤢";
+  font-size: 11px;
+  color: var(--text-faint);
+  opacity: 0;
+  transition: opacity .12s;
+}
+.chart-panel h3.zoomable:hover { color: var(--accent-text); }
+.chart-panel h3.zoomable:hover::after { opacity: 1; }
+.chart-panel h3.zoomable:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+
+.chart-modal {
+  position: fixed;
+  /* Inset rather than a fixed size: the point is the largest readable copy the
+     viewport allows, on a phone as much as on a desktop. */
+  inset: 4vh 4vw;
+  z-index: 51;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.chart-modal[hidden] { display: none; }
+
+.chart-modal-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.chart-modal-head h2 { font-size: 16px; margin: 0; }
+.chart-modal-head .sub { font-size: 12.5px; color: var(--text-muted); margin-top: 3px; max-width: 70ch; }
+
+/* min-height:0 lets the canvas shrink inside the flex column instead of
+   overflowing it, which is what Chart.js needs to size itself correctly. */
+.chart-modal-body { flex: 1; min-height: 0; padding: 18px; position: relative; overflow: auto; }
+.chart-modal-body > canvas { width: 100% !important; height: 100% !important; }
+.chart-modal-body > .rank-list { max-width: 900px; margin: 0 auto; }
+
+#chart-scrim { z-index: 50; }

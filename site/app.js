@@ -28,6 +28,8 @@ const state = {
   peopleSort: { column: "resolved", direction: -1 },
   onlyMine: false,
   charts: {},
+  chartConfigs: {},
+  zoomChart: null,
   detailCache: new Map(),
 };
 
@@ -143,7 +145,10 @@ function applyIndex(data, { fromCache = false, ageMs = 0 } = {}) {
   state.meta = data;
   buildLoanIndex();
 
-  const excluded = data.excludedFeatureRequests || 0;
+  const excludedNote = [
+    data.excludedFeatureRequests ? `${data.excludedFeatureRequests} feature requests` : null,
+    data.excludedServiceRequests ? `${data.excludedServiceRequests} service requests` : null,
+  ].filter(Boolean).join(" and ");
   showWarning(
     data.stale
       ? `Jira could not be reached, so this is the last good copy from ${fmtDateTime(data.fetchedAt)}. ${data.warning || ""}`
@@ -152,9 +157,11 @@ function applyIndex(data, { fromCache = false, ageMs = 0 } = {}) {
       : ""
   );
 
+  // Always say what was filtered out, so this count can be reconciled against
+  // Jira's own rather than quietly disagreeing with it.
   $("brand-tag").textContent =
-    `${data.project} · ${state.issues.length} production tickets · ${state.loans.size} loans` +
-    (excluded ? ` · ${excluded} feature requests excluded` : "");
+    `${data.project} · ${state.issues.length} production issues · ${state.loans.size} loans` +
+    (excludedNote ? ` · excludes ${excludedNote}` : "");
 
   const stamp = fromCache
     ? `from this browser, ${relative(data.fetchedAt)}`
@@ -643,46 +650,72 @@ async function deepSearch(query) {
 
 // ── tickets view ──────────────────────────────────────────────────────
 
+/**
+ * Fill the filter picklists from the loaded tickets.
+ *
+ * This used to bail out early if the topic select already had options, which
+ * looked safe and was not: init() switches to the tab named in the URL hash
+ * *before* the index finishes loading, so a reload landing on #tickets ran this
+ * against an empty array, appended nothing but the "Any …" placeholders, and
+ * then the guard blocked it from ever filling in again. Every picklist stayed
+ * permanently blank, and only for people who had visited that tab before —
+ * because that is what puts the hash in the URL.
+ *
+ * So it is now driven by the data instead: nothing to do until tickets exist,
+ * and once they do the options are rebuilt from scratch. Rebuilding is cheap and
+ * idempotent, and it keeps the lists honest when the ticket set changes (a
+ * refresh, or the "Only mine" lens).
+ */
 function populateFilters() {
-  const topicSelect = $("filter-topic");
-  if (topicSelect.options.length) return;
+  if (!state.issues.length) return;
 
-  topicSelect.append(new Option("Any topic", ""));
-  const present = new Set(state.issues.map((i) => i.topic));
-  for (const topic of [...TOPICS, UNCATEGORISED]) {
-    if (present.has(topic.id)) topicSelect.append(new Option(topic.label, topic.id));
-  }
-
-  const prioritySelect = $("filter-priority");
-  prioritySelect.append(new Option("Any priority", ""));
-  for (const priority of [...new Set(state.issues.map((i) => i.priority))].sort()) {
-    prioritySelect.append(new Option(priority, priority));
-  }
-
-  // People, ordered by how many tickets they hold rather than alphabetically —
-  // a list of five names is easier to scan by weight.
-  const byVolume = (nameOf) => {
+  // Ordered by how many tickets each holds rather than alphabetically — a short
+  // list of names is easier to scan by weight.
+  const byVolume = (valueOf) => {
     const counts = new Map();
     for (const issue of state.issues) {
-      const name = nameOf(issue);
-      counts.set(name, (counts.get(name) || 0) + 1);
+      const value = valueOf(issue);
+      if (value == null) continue;
+      counts.set(value, (counts.get(value) || 0) + 1);
     }
     return [...counts.entries()].sort((a, b) => b[1] - a[1]);
   };
 
-  const ckSelect = $("filter-ck");
-  ckSelect.append(new Option("Any CK user", ""));
-  for (const [name, count] of byVolume(ckUserName)) ckSelect.append(new Option(`${name} (${count})`, name));
+  /** Replace a select's options, keeping the current choice if still offered. */
+  const fill = (id, placeholder, entries) => {
+    const select = $(id);
+    if (!select) return;
+    const previous = select.value;
+    select.innerHTML = "";
+    select.append(new Option(placeholder, ""));
+    for (const [value, label] of entries) select.append(new Option(label, value));
+    select.value = [...select.options].some((o) => o.value === previous) ? previous : "";
+  };
 
-  const assigneeSelect = $("filter-assignee");
-  assigneeSelect.append(new Option("Any assignee", ""));
-  for (const [name, count] of byVolume(assigneeName)) assigneeSelect.append(new Option(`${name} (${count})`, name));
+  const present = new Set(state.issues.map((i) => i.topic));
+  fill(
+    "filter-topic",
+    "Any topic",
+    [...TOPICS, UNCATEGORISED].filter((t) => present.has(t.id)).map((t) => [t.id, t.label])
+  );
 
-  const opTypeSelect = $("filter-optype");
-  opTypeSelect.append(new Option("Issue or request", ""));
-  for (const [name] of byVolume((i) => i.opsType || "(not set)")) {
-    if (name !== "(not set)") opTypeSelect.append(new Option(name, name));
-  }
+  fill(
+    "filter-priority",
+    "Any priority",
+    byVolume((i) => i.priority).map(([name, count]) => [name, `${name} (${count})`])
+  );
+
+  fill(
+    "filter-ck",
+    "Any CK user",
+    byVolume(ckUserName).map(([name, count]) => [name, `${name} (${count})`])
+  );
+
+  fill(
+    "filter-assignee",
+    "Any assignee",
+    byVolume(assigneeName).map(([name, count]) => [name, `${name} (${count})`])
+  );
 }
 
 function filteredTickets() {
@@ -693,7 +726,6 @@ function filteredTickets() {
   const loanFilter = $("filter-loan").value;
   const ckFilter = $("filter-ck").value;
   const assigneeFilter = $("filter-assignee").value;
-  const opTypeFilter = $("filter-optype").value;
 
   return visibleIssues().filter((issue) => {
     if (stateFilter === "open" && !isOpen(issue)) return false;
@@ -702,7 +734,6 @@ function filteredTickets() {
     if (priority && issue.priority !== priority) return false;
     if (ckFilter && ckUserName(issue) !== ckFilter) return false;
     if (assigneeFilter && assigneeName(issue) !== assigneeFilter) return false;
-    if (opTypeFilter && issue.opsType !== opTypeFilter) return false;
     if (loanFilter === "with" && !(issue.loans || []).length) return false;
     if (loanFilter === "without" && (issue.loans || []).length) return false;
     if (query) {
@@ -1040,42 +1071,54 @@ function tickTruncator() {
   };
 }
 
+/**
+ * The option merging both the inline charts and the zoomed copy go through, so a
+ * chart in the modal is styled identically to the one on the card.
+ */
+function mergedChartOptions(config) {
+  const text = chartTextColor();
+  const grid = chartGridColor();
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    ...config.options,
+    plugins: { legend: { display: false }, ...(config.options?.plugins || {}) },
+    scales: config.options?.scales
+      ? Object.fromEntries(
+          Object.entries(config.options.scales).map(([axis, spec]) => {
+            // The category axis is y on a horizontal bar chart, x otherwise.
+            const isCategoryAxis = config.options?.indexAxis === "y" ? axis === "y" : axis === "x";
+            return [
+              axis,
+              {
+                ...spec,
+                ticks: {
+                  color: text,
+                  ...(isCategoryAxis ? { callback: tickTruncator() } : {}),
+                  ...(spec.ticks || {}),
+                },
+                grid: { color: grid, ...(spec.grid || {}) },
+              },
+            ];
+          })
+        )
+      : undefined,
+  };
+}
+
+/** The untruncated label, for the zoomed view where it fits. */
+function fullTickLabel(value) {
+  return this.getLabelForValue ? this.getLabelForValue(value) : value;
+}
+
 function drawChart(id, config) {
   if (typeof window.Chart === "undefined") return;
   state.charts[id]?.destroy();
   const canvas = $(id);
   if (!canvas) return;
-  const text = chartTextColor();
-  const grid = chartGridColor();
-  state.charts[id] = new window.Chart(canvas, {
-    ...config,
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      ...config.options,
-      plugins: { legend: { display: false }, ...(config.options?.plugins || {}) },
-      scales: config.options?.scales
-        ? Object.fromEntries(
-            Object.entries(config.options.scales).map(([axis, spec]) => {
-              // The category axis is y on a horizontal bar chart, x otherwise.
-              const isCategoryAxis = config.options?.indexAxis === "y" ? axis === "y" : axis === "x";
-              return [
-                axis,
-                {
-                  ...spec,
-                  ticks: {
-                    color: text,
-                    ...(isCategoryAxis ? { callback: tickTruncator() } : {}),
-                    ...(spec.ticks || {}),
-                  },
-                  grid: { color: grid, ...(spec.grid || {}) },
-                },
-              ];
-            })
-          )
-        : undefined,
-    },
-  });
+  // Kept so the zoom modal can rebuild the same chart at a readable size.
+  state.chartConfigs[id] = config;
+  state.charts[id] = new window.Chart(canvas, { ...config, options: mergedChartOptions(config) });
 }
 
 function renderInsights() {
@@ -1570,6 +1613,139 @@ function showNoteEditor(section, trigger, detail, kind, summary) {
   };
 }
 
+// ── chart zoom ────────────────────────────────────────────────────────
+
+/**
+ * Open a panel's chart big, in a modal. Clicking the backdrop or pressing
+ * Escape closes it.
+ *
+ * The chart is rebuilt rather than moved: a Chart.js instance is bound to its
+ * canvas, so relocating the original would leave a hole in the card and a chart
+ * sized for a box a third as wide. The data is deep-copied (plain numbers and
+ * colour strings) while the options go back through the same merge as the
+ * inline version, so the two are consistent and neither mutates the other's
+ * state.
+ *
+ * Rank lists are not charts, but a panel whose title looks clickable and then
+ * does nothing is worse than one that opens — so those clone their list, and
+ * show it in full rather than the top dozen the card is limited to.
+ */
+function openChartZoom(panel) {
+  const heading = panel.querySelector("h3");
+  const sub = panel.querySelector(".sub");
+  const canvas = panel.querySelector("canvas");
+  const rankList = panel.querySelector(".rank-list");
+
+  const modal = $("chart-modal");
+  modal.innerHTML = "";
+
+  const head = el("div", "chart-modal-head");
+  const titles = el("div");
+  titles.append(el("h2", null, heading?.textContent || "Chart"));
+  if (sub?.textContent.trim()) titles.append(el("div", "sub", sub.textContent.trim()));
+  head.append(titles);
+  const close = el("button", "icon-button", "Close");
+  close.style.marginLeft = "auto";
+  close.onclick = closeChartZoom;
+  head.append(close);
+  modal.append(head);
+
+  const body = el("div", "chart-modal-body");
+
+  if (canvas && state.chartConfigs[canvas.id] && typeof window.Chart !== "undefined") {
+    const config = state.chartConfigs[canvas.id];
+    const zoomCanvas = document.createElement("canvas");
+    body.append(zoomCanvas);
+    modal.append(body);
+    $("chart-scrim").hidden = false;
+    modal.hidden = false;
+
+    state.zoomChart?.destroy();
+    state.zoomChart = new window.Chart(zoomCanvas, {
+      type: config.type,
+      data: JSON.parse(JSON.stringify(config.data)),
+      options: {
+        ...mergedChartOptions(config),
+        // Room to breathe at this size: show every label in full, and put the
+        // legend back for multi-series charts.
+        plugins: {
+          ...mergedChartOptions(config).plugins,
+          legend: config.data.datasets.length > 1
+            ? { display: true, position: "bottom", labels: { color: chartTextColor(), boxWidth: 12 } }
+            : { display: false },
+        },
+        scales: config.options?.scales
+          ? Object.fromEntries(
+              Object.entries(mergedChartOptions(config).scales).map(([axis, spec]) => [
+                axis,
+                {
+                  ...spec,
+                  ticks: {
+                    ...spec.ticks,
+                    // There is room for the whole label here, so the truncating
+                    // callback is replaced with one that returns it in full.
+                    // Note it must be *replaced*, not deleted: setting callback
+                    // to undefined does not restore Chart.js's default
+                    // formatter, it falls through to printing the raw category
+                    // index — which rendered every axis as 0,1,2,3…
+                    callback: fullTickLabel,
+                    autoSkip: false,
+                    font: { size: 12 },
+                  },
+                },
+              ])
+            )
+          : undefined,
+      },
+    });
+    return;
+  }
+
+  if (rankList) {
+    body.append(rankList.cloneNode(true));
+    modal.append(body);
+    $("chart-scrim").hidden = false;
+    modal.hidden = false;
+    // The clone's buttons lost their handlers, so wire them to the same jump.
+    const keys = [...rankList.querySelectorAll(".rank-row .rk")].map((n) => n.textContent);
+    body.querySelectorAll(".rank-row").forEach((row, index) => {
+      const key = keys[index];
+      row.onclick = () => {
+        closeChartZoom();
+        switchTab("loans");
+        selectLoan(key);
+      };
+    });
+  }
+}
+
+function closeChartZoom() {
+  state.zoomChart?.destroy();
+  state.zoomChart = null;
+  $("chart-modal").hidden = true;
+  $("chart-scrim").hidden = true;
+}
+
+/** Every chart panel's title becomes the control that opens it. */
+function wireChartZoom() {
+  for (const panel of document.querySelectorAll(".chart-panel")) {
+    const heading = panel.querySelector("h3");
+    if (!heading || heading.dataset.zoomWired) continue;
+    heading.dataset.zoomWired = "1";
+    heading.classList.add("zoomable");
+    heading.title = "Click to open this bigger";
+    heading.tabIndex = 0;
+    heading.setAttribute("role", "button");
+    heading.onclick = () => openChartZoom(panel);
+    heading.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openChartZoom(panel);
+      }
+    };
+  }
+}
+
 // ── tabs, theme, wiring ───────────────────────────────────────────────
 
 const TABS = ["loans", "tickets", "people", "insights"];
@@ -1612,7 +1788,7 @@ function goHome() {
   $("loan-search").value = "";
   $("loan-sort").value = "count";
   $("ticket-search").value = "";
-  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee", "filter-optype"]) {
+  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee"]) {
     const field = $(id);
     if (field) field.value = "";
   }
@@ -1629,7 +1805,7 @@ function goHome() {
 
 function clearTicketFilters() {
   $("ticket-search").value = "";
-  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee", "filter-optype"]) {
+  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee"]) {
     const field = $(id);
     if (field) field.value = "";
   }
@@ -1646,6 +1822,9 @@ function applyTheme(theme) {
   }
   // Chart.js bakes tick colours in at construction, so they are rebuilt.
   if (!$("view-insights").hidden) renderInsights();
+  if (!$("view-people").hidden) renderPeople();
+  // A chart open in the modal would otherwise keep the old theme's axis colours.
+  if (!$("chart-modal").hidden) closeChartZoom();
 }
 
 function init() {
@@ -1701,7 +1880,7 @@ function init() {
   $("loan-sort").onchange = renderLoanList;
 
   $("ticket-search").oninput = debounce(renderTickets, 140);
-  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee", "filter-optype"]) {
+  for (const id of ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee"]) {
     $(id).onchange = renderTickets;
   }
 
@@ -1721,8 +1900,15 @@ function init() {
   }
 
   $("scrim").onclick = closeDrawer;
+  $("chart-scrim").onclick = closeChartZoom;
+  wireChartZoom();
+
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.openTicket) closeDrawer();
+    if (event.key !== "Escape") return;
+    // Innermost first: a zoomed chart opened from a panel should close before
+    // the drawer that may still be open behind it.
+    if (!$("chart-modal").hidden) closeChartZoom();
+    else if (state.openTicket) closeDrawer();
   });
 
   loadIndex();
