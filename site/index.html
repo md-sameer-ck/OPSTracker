@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OPSTracker — loans &amp; operational issues</title>
+<meta name="description" content="Every OPS ticket grouped by the loan account it touches, with the issue, the fix, and the errors that keep coming back.">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-row">
+    <div class="brand">
+      <h1>OPSTracker</h1>
+      <span class="tag" id="brand-tag">loans &amp; operational issues</span>
+    </div>
+    <div class="masthead-actions">
+      <span class="freshness" id="freshness"></span>
+      <button class="icon-button" id="refresh" title="Re-fetch from Jira, bypassing the cache">↻ Refresh</button>
+      <button class="icon-button" id="theme-toggle" title="Switch light / dark" aria-label="Switch light or dark theme">◐</button>
+    </div>
+  </div>
+</header>
+
+<div class="kpis" id="kpis"></div>
+
+<nav class="tabs" role="tablist">
+  <button class="tab" role="tab" id="tab-loans" aria-selected="true" aria-controls="view-loans">Loans</button>
+  <button class="tab" role="tab" id="tab-tickets" aria-selected="false" aria-controls="view-tickets">All tickets</button>
+  <button class="tab" role="tab" id="tab-insights" aria-selected="false" aria-controls="view-insights">Recurring errors</button>
+</nav>
+
+<main>
+  <div class="banner error" id="error-banner" hidden></div>
+  <div class="banner warn" id="warn-banner" hidden></div>
+
+  <!-- ── Loans ─────────────────────────────────────────────────────── -->
+  <section class="view" id="view-loans" role="tabpanel" aria-labelledby="tab-loans">
+    <div class="split">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Loan accounts</h2>
+          <span class="spacer"></span>
+          <select class="field" id="loan-sort" style="width:auto" aria-label="Sort loans">
+            <option value="count">Most tickets</option>
+            <option value="recent">Most recent activity</option>
+            <option value="open">Most still open</option>
+            <option value="key">Loan number</option>
+          </select>
+        </div>
+        <div class="panel-head" style="border-bottom:1px solid var(--border)">
+          <input class="field" id="loan-search" type="search" placeholder="Loan number — 1122, LAI-1122, LAI 1122…" autocomplete="off">
+        </div>
+        <div class="loan-list" id="loan-list"></div>
+      </div>
+
+      <div class="panel" id="loan-detail">
+        <div class="empty-state">
+          <div class="big">Pick a loan to see its history</div>
+          Every OPS ticket that names the loan, oldest to newest.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── All tickets ───────────────────────────────────────────────── -->
+  <section class="view" id="view-tickets" role="tabpanel" aria-labelledby="tab-tickets" hidden>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="filters">
+          <input class="field grow" id="ticket-search" type="search" placeholder="Search summary, preview, key or loan…" autocomplete="off">
+          <select class="field" id="filter-state" aria-label="Filter by state">
+            <option value="">Any state</option>
+            <option value="open">Open only</option>
+            <option value="done">Resolved only</option>
+          </select>
+          <select class="field" id="filter-topic" aria-label="Filter by topic"></select>
+          <select class="field" id="filter-priority" aria-label="Filter by priority"></select>
+          <select class="field" id="filter-loan" aria-label="Filter by loan linkage">
+            <option value="">Any ticket</option>
+            <option value="with">Names a loan</option>
+            <option value="without">No loan named</option>
+          </select>
+        </div>
+      </div>
+      <div class="panel-head" style="padding-top:0;border-bottom:1px solid var(--border)">
+        <span class="freshness" id="ticket-count"></span>
+      </div>
+      <div class="table-scroll">
+        <table id="ticket-table">
+          <thead>
+            <tr>
+              <th class="sortable" data-sort="key">Ticket</th>
+              <th class="sortable" data-sort="created">Raised</th>
+              <th>Summary</th>
+              <th class="sortable" data-sort="topicLabel">Topic</th>
+              <th>Loans</th>
+              <th class="sortable" data-sort="status">Status</th>
+              <th class="sortable" data-sort="priority">Priority</th>
+              <th class="sortable" data-sort="days">Days</th>
+            </tr>
+          </thead>
+          <tbody id="ticket-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Recurring errors ──────────────────────────────────────────── -->
+  <section class="view" id="view-insights" role="tabpanel" aria-labelledby="tab-insights" hidden>
+    <div class="chart-grid">
+      <div class="chart-panel">
+        <h3>What goes wrong most</h3>
+        <div class="sub">Tickets by derived topic. Read against the topic definitions, not as Jira components — 28% of tickets have no component at all.</div>
+        <div class="chart-box tall"><canvas id="chart-topics"></canvas></div>
+      </div>
+
+      <div class="chart-panel">
+        <h3>Loans that keep coming back</h3>
+        <div class="sub">Loan accounts with the most OPS tickets against them. Click one to open its history.</div>
+        <div class="rank-list" id="rank-loans"></div>
+      </div>
+
+      <div class="chart-panel">
+        <h3>Ticket volume by month</h3>
+        <div class="sub">When tickets were raised, split by whether they name a loan.</div>
+        <div class="chart-box"><canvas id="chart-volume"></canvas></div>
+      </div>
+
+      <div class="chart-panel">
+        <h3>How long topics take to resolve</h3>
+        <div class="sub">Median days from raised to resolved, resolved tickets only. Topics with fewer than three are left out.</div>
+        <div class="chart-box"><canvas id="chart-cycle"></canvas></div>
+      </div>
+
+      <div class="chart-panel">
+        <h3>Repeat topics on the same loan</h3>
+        <div class="sub">The same kind of problem hitting one loan more than once — the strongest signal of an unfixed root cause.</div>
+        <div class="rank-list" id="rank-repeats"></div>
+      </div>
+
+      <div class="chart-panel">
+        <h3>Jira components</h3>
+        <div class="sub">The team's own labelling, for comparison with the derived topics above.</div>
+        <div class="chart-box"><canvas id="chart-components"></canvas></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden></aside>
+
+<script src="vendor/chart.umd.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

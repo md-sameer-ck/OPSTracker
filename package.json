@@ -1,0 +1,14 @@
+{
+  "name": "ops-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Loan-centric tracker for the Jira OPS project (Salesforce Operational Issues) — groups every OPS ticket under the loan account it touches, and surfaces the org's most common recurring errors.",
+  "scripts": {
+    "dev": "node scripts/dev-server.js",
+    "test": "node scripts/lib.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+.env
+.netlify/
+.DS_Store
+
+# Demo fixtures built by scripts/make-fixture.js. These hold real ticket text
+# (loan numbers, colleagues' names), so they stay out of the repo — generate
+# your own when you want to browse the UI without a Jira token.
+data/
