@@ -75,8 +75,10 @@
           <input class="field grow" id="ticket-search" type="search" placeholder="Search summary, preview, key or loan…" autocomplete="off">
           <select class="field" id="filter-state" aria-label="Filter by state">
             <option value="">Any state</option>
-            <option value="open">Open only</option>
-            <option value="done">Resolved only</option>
+            <option value="withus">Still with us</option>
+            <option value="waiting">Waiting on others</option>
+            <option value="delivered">Delivered (closed or waiting)</option>
+            <option value="done">Closed only</option>
           </select>
           <select class="field" id="filter-topic" aria-label="Filter by topic"></select>
           <select class="field" id="filter-priority" aria-label="Filter by priority"></select>
@@ -100,13 +102,13 @@
               <th class="sortable" data-sort="key">Ticket</th>
               <th class="sortable" data-sort="created">Raised</th>
               <th>Summary</th>
-              <th class="sortable" data-sort="topicLabel">Topic</th>
+              <th class="sortable has-tip" data-sort="topicLabel" data-term="topic">Topic</th>
               <th>Loans</th>
-              <th class="sortable" data-sort="ck">CK user</th>
+              <th class="sortable has-tip" data-sort="ck" data-term="ckUser">CK user</th>
               <th class="sortable" data-sort="status">Status</th>
               <th class="sortable" data-sort="priority">Priority</th>
-              <th class="sortable" data-sort="work">Work time</th>
-              <th class="sortable" data-sort="days">Waiting</th>
+              <th class="sortable has-tip" data-sort="work" data-term="workTime">Work time</th>
+              <th class="sortable has-tip" data-sort="days" data-term="calendarAge">Calendar age</th>
             </tr>
           </thead>
           <tbody id="ticket-body"></tbody>
@@ -142,14 +144,16 @@
           <thead>
             <tr>
               <th>Person</th>
-              <th class="sortable" data-people-sort="resolved">Completed</th>
-              <th class="sortable" data-people-sort="open">Open</th>
-              <th class="sortable" data-people-sort="medianSlaMs">Median work time</th>
-              <th class="sortable" data-people-sort="p90SlaMs">p90 work time</th>
-              <th class="sortable" data-people-sort="medianFirstResponseMs">Median 1st response</th>
-              <th class="sortable" data-people-sort="breachRate">SLA breached</th>
-              <th class="sortable" data-people-sort="medianCalendarMs">Median wait</th>
-              <th class="sortable" data-people-sort="distinctLoans">Loans</th>
+              <th class="sortable has-tip" data-people-sort="delivered" data-term="delivered">Delivered</th>
+              <th class="sortable has-tip" data-people-sort="closed" data-term="closed">Closed</th>
+              <th class="sortable has-tip" data-people-sort="waiting" data-term="waiting">Waiting</th>
+              <th class="sortable has-tip" data-people-sort="withUs" data-term="withUs">With us</th>
+              <th class="sortable has-tip" data-people-sort="medianSlaMs" data-term="workTime">Median work time</th>
+              <th class="sortable has-tip" data-people-sort="p90SlaMs" data-term="p90">p90 work time</th>
+              <th class="sortable has-tip" data-people-sort="medianFirstResponseMs" data-term="firstResponse">Median 1st response</th>
+              <th class="sortable has-tip" data-people-sort="breachRate" data-term="breached">SLA breached</th>
+              <th class="sortable has-tip" data-people-sort="medianCalendarMs" data-term="calendarAge">Median calendar age</th>
+              <th class="sortable has-tip" data-people-sort="distinctLoans" data-term="loans">Loans</th>
             </tr>
           </thead>
           <tbody id="people-body"></tbody>
@@ -159,13 +163,13 @@
 
     <div class="chart-grid">
       <div class="chart-panel">
-        <h3>Tickets completed</h3>
-        <div class="sub">Resolved tickets per person in the selected window.</div>
+        <h3>Tickets delivered</h3>
+        <div class="sub">Per person in the selected window — closed in Jira, plus parked with Q2 or the client once our part was done.</div>
         <div class="chart-box"><canvas id="chart-completed"></canvas></div>
       </div>
       <div class="chart-panel">
         <h3>Median work time per ticket</h3>
-        <div class="sub">Jira SLA working hours from raised to resolved — not calendar time. Lower is faster.</div>
+        <div class="sub">Jira SLA working hours, from tickets whose clock has stopped — not calendar time. Lower is faster.</div>
         <div class="chart-box"><canvas id="chart-worktime"></canvas></div>
         <div class="sub" id="worktime-note" style="margin:8px 0 0"></div>
       </div>

@@ -12,8 +12,8 @@ import { truncate } from "./lib/text.js";
 import { FIX_NOTE_MARKER, ISSUE_NOTE_MARKER } from "./lib/digest.js";
 import {
   assigneeName, calendarMs, ckUserName, firstResponseMs, formatDuration, formatWorkTime,
-  isOpen as ticketIsOpen, isResolved, median, slaBreached, slaElapsedMs, summarise,
-  throughputBy, toHours, UNASSIGNED,
+  hasSettledSla, isDelivered, isResolved, isWaiting, isWithUs, median, slaBreached,
+  slaElapsedMs, summarise, throughputBy, ticketState, toHours, UNASSIGNED,
 } from "./lib/stats.js";
 
 const API = "/api";
@@ -25,7 +25,7 @@ const state = {
   selectedLoan: null,
   openTicket: null,
   ticketSort: { column: "created", direction: -1 },
-  peopleSort: { column: "resolved", direction: -1 },
+  peopleSort: { column: "delivered", direction: -1 },
   onlyMine: false,
   charts: {},
   chartConfigs: {},
@@ -51,6 +51,51 @@ const el = (tag, className, text) => {
   return node;
 };
 
+// ── glossary ──────────────────────────────────────────────────────────
+//
+// The dashboard is full of terms that are obvious once but not on sight: SLA,
+// p90, "work time" versus "waiting". Rather than crowd the labels, each one
+// carries its full form on hover, defined here once so the wording cannot drift
+// between the KPI card, the table header and the ticket panel.
+
+const GLOSSARY = {
+  sla: "SLA — Service Level Agreement. The response and resolution targets agreed for this service desk. Jira runs a clock against each one.",
+  workTime:
+    "Work time — Jira's SLA clock from raised to resolved, counting the desk's working hours only. It excludes nights, weekends, and any time the SLA was paused, so it measures effort rather than elapsed days.",
+  calendarAge:
+    "Calendar age — plain wall-clock time from raised to resolved, counting nights and weekends. This is how long the reporter waited, which is usually far longer than the work time.",
+  firstResponse:
+    "First response — SLA working hours from the ticket being raised to somebody on the desk replying to it for the first time.",
+  p90: "p90 — the 90th percentile. Nine out of ten tickets were faster than this. It shows the slow tail that a median hides.",
+  median: "Median — the middle value. Half the tickets were faster, half slower. Used instead of an average so one very old ticket cannot distort the figure.",
+  breached:
+    "SLA breached — the resolution clock passed its target before the ticket was settled. Counted only over tickets whose clock has stopped, so a figure cannot creep up on its own.",
+  breachingNow:
+    "Breaching now — past target on a clock that is still running. Shown separately from the breach rate because it is not a finished measurement yet.",
+  ckUser:
+    "CK User — the Jira field naming which of the CloudKaptan team picked the ticket up. The Jira login for this desk is a single shared account, so the assignee does not tell you this.",
+  assignee: "Assignee — the Jira assignee, usually the Folk2Folk-side owner of the ticket rather than the person who did the work.",
+  withUs:
+    "With us — To Do, Acknowledged or In Progress. Work we still owe: these are the only tickets genuinely outstanding on our side.",
+  waiting:
+    "Waiting on others — Q2, Pending or Waiting on Customer. Our work is finished and the ticket is parked with Q2 support or with the client, so it is not our backlog.",
+  delivered: "Delivered — our part is done: the ticket is either closed in Jira or parked waiting on Q2 or the client.",
+  closed: "Closed — resolved in Jira (Done, Declined or Moved to Backlog).",
+  measuredOn: "Measured on — how many tickets the timing figures are based on. Only tickets whose SLA clock has stopped can contribute.",
+  topic:
+    "Topic — derived from the ticket's own words, with its Jira component as a hint. Jira's components alone cannot answer this: 28% of tickets have none, and 'Data Correction' covers 44% of the rest.",
+  loans: "Loans — distinct loan accounts named in these tickets, normalised so LAI-00001797, LAI 1797 and LAI1797 count once.",
+};
+
+/** Attach a term's full form to an element and mark it as hoverable. */
+function tip(node, term) {
+  const text = GLOSSARY[term];
+  if (!text) return node;
+  node.title = text;
+  node.classList.add("has-tip");
+  return node;
+}
+
 // ── formatting ────────────────────────────────────────────────────────
 
 const DATE_FMT = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
@@ -72,7 +117,7 @@ function relative(value) {
   return `${years} years ago`;
 }
 
-const isOpen = ticketIsOpen;
+const isOpen = (issue) => issue.statusCategory !== "done";
 
 /** Calendar days a ticket took, or has been open so far. */
 function ageDays(issue) {
@@ -260,11 +305,12 @@ function buildLoanIndex() {
     for (const loanKey of issue.loans || []) {
       let loan = loans.get(loanKey);
       if (!loan) {
-        loan = { key: loanKey, issues: [], open: 0, last: null, first: null, topics: new Map() };
+        loan = { key: loanKey, issues: [], open: 0, waiting: 0, last: null, first: null, topics: new Map() };
         loans.set(loanKey, loan);
       }
       loan.issues.push(issue);
-      if (isOpen(issue)) loan.open += 1;
+      if (isWithUs(issue)) loan.open += 1;
+      if (isWaiting(issue)) loan.waiting += 1;
       const created = asDate(issue.created);
       if (created) {
         if (!loan.last || created > loan.last) loan.last = created;
@@ -350,49 +396,53 @@ function renderKpis() {
     : [];
 
   const kpis = [
+    { value: stats.total, label: "Production issues", note: `${withLoan} name a loan (${pct(withLoan, stats.total)})` },
     {
-      value: stats.total,
-      label: "Production tickets",
-      note: `${withLoan} name a loan (${pct(withLoan, stats.total)})`,
+      // The number that actually means "our backlog". It used to include
+      // tickets parked with Q2 or the client, which made it three times bigger
+      // than the work we owe.
+      value: stats.withUs,
+      label: "Still with us",
+      term: "withUs",
+      note: stats.oldestWithUs ? `oldest raised ${relative(stats.oldestWithUs)}` : "nothing outstanding",
     },
     {
-      value: stats.open,
-      label: "Still open",
-      note: stats.oldestOpen ? `oldest raised ${relative(stats.oldestOpen)}` : "nothing outstanding",
+      value: stats.waiting,
+      label: "Waiting on others",
+      term: "waiting",
+      note: "our work done · with Q2 or the client",
     },
     {
-      // The headline "how long does a ticket take" number. Working hours, not
-      // calendar days — see the note at the top of stats.js.
       value: formatWorkTime(stats.medianSlaMs),
       label: "Median work time",
-      note: `p90 ${formatWorkTime(stats.p90SlaMs)} · across ${stats.measuredOn} resolved`,
+      term: "workTime",
+      note: `p90 ${formatWorkTime(stats.p90SlaMs)} · across ${stats.measuredOn} settled`,
       small: true,
     },
     {
       value: formatWorkTime(stats.medianFirstResponseMs),
       label: "Median 1st response",
+      term: "firstResponse",
       note: "SLA clock, working hours",
       small: true,
     },
     {
-      value: stats.breachRate == null ? "—" : pct(stats.breached, stats.resolved),
+      value: stats.breachRate == null ? "—" : pct(stats.breached, stats.measuredOn),
       label: "SLA breached",
-      note: `${stats.breached} of ${stats.resolved} resolved`,
+      term: "breached",
+      note: `${stats.breached} of ${stats.measuredOn} settled` + (stats.breachingNow ? ` · ${stats.breachingNow} breaching now` : ""),
       small: true,
     },
-    {
-      value: state.loans.size,
-      label: "Loans affected",
-      note: `${repeatLoans.length} with 3 or more tickets`,
-    },
+    { value: state.loans.size, label: "Loans affected", note: `${repeatLoans.length} with 3 or more tickets` },
   ];
 
   if (state.meta?.me) {
     const myStats = summarise(mine);
     kpis.push({
-      value: `${myStats.resolved}/${myStats.total}`,
-      label: "Mine, done / total",
-      note: myStats.measuredOn ? `median ${formatWorkTime(myStats.medianSlaMs)}` : "no resolved tickets yet",
+      value: `${myStats.delivered}/${myStats.total}`,
+      label: "Mine, delivered / total",
+      term: "delivered",
+      note: myStats.measuredOn ? `median ${formatWorkTime(myStats.medianSlaMs)}` : "nothing settled yet",
       small: true,
     });
   }
@@ -403,7 +453,9 @@ function renderKpis() {
     const card = el("div", "kpi");
     const value = el("div", "value", String(kpi.value));
     if (kpi.small) value.style.fontSize = "17px";
-    card.append(value, el("div", "label", kpi.label), el("div", "note", kpi.note));
+    const label = el("div", "label", kpi.label);
+    if (kpi.term) tip(label, kpi.term);
+    card.append(value, label, el("div", "note", kpi.note));
     container.append(card);
   }
 }
@@ -473,7 +525,8 @@ function renderLoanList() {
 
     const top = el("div", "top");
     top.append(el("span", "key", loan.key));
-    if (loan.open) top.append(el("span", "chip status-new", `${loan.open} open`));
+    if (loan.open) top.append(tip(el("span", "chip status-new", `${loan.open} with us`), "withUs"));
+    if (loan.waiting) top.append(tip(el("span", "chip status-waiting", `${loan.waiting} waiting`), "waiting"));
     top.append(el("span", "count", `${loan.issues.length} ticket${loan.issues.length === 1 ? "" : "s"}`));
 
     const meta = el("div", "meta");
@@ -513,8 +566,12 @@ function renderLoanDetail() {
   const header = el("div", "loan-header");
   const title = el("div", "title");
   title.append(el("h2", null, loan.key));
-  const openChip = el("span", loan.open ? "chip status-new" : "chip status-done", loan.open ? `${loan.open} open` : "all resolved");
-  title.append(openChip);
+  const stateChip = loan.open
+    ? tip(el("span", "chip status-new", `${loan.open} still with us`), "withUs")
+    : loan.waiting
+    ? tip(el("span", "chip status-waiting", `${loan.waiting} waiting on others`), "waiting")
+    : el("span", "chip status-done", "all resolved");
+  title.append(stateChip);
   const jiraLink = el("a", "icon-button", "Open in Jira ↗");
   jiraLink.href = jiraSearchUrl(loan.key);
   jiraLink.target = "_blank";
@@ -552,10 +609,20 @@ function renderLoanDetail() {
   panel.append(timeline);
 }
 
+/** A status chip that says which of the three states the ticket is in. */
+function statusChip(issue) {
+  const state = ticketState(issue);
+  const chip = el("span", `chip status-${state === "waiting" ? "waiting" : issue.statusCategory}`, issue.status);
+  if (state === "waiting") tip(chip, "waiting");
+  else if (state === "active") tip(chip, "withUs");
+  return chip;
+}
+
 function timelineItem(issue) {
   const item = el("button", "tl-item");
   item.type = "button";
-  item.dataset.cat = issue.statusCategory;
+  // The dot colour distinguishes "still ours" from "parked elsewhere".
+  item.dataset.cat = ticketState(issue) === "waiting" ? "waiting" : issue.statusCategory;
 
   const card = el("div", "tl-card");
 
@@ -576,7 +643,7 @@ function timelineItem(issue) {
   if (issue.preview) card.append(el("div", "tl-preview", truncate(issue.preview, 150)));
 
   const chips = el("div", "tl-chips");
-  chips.append(el("span", `chip status-${issue.statusCategory}`, issue.status));
+  chips.append(statusChip(issue));
   if (issue.priority && issue.priority !== "None") chips.append(el("span", `chip prio-${issue.priority}`, issue.priority));
   chips.append(el("span", "chip topic", issue.topicLabel));
   if (issue.ckUser?.name) chips.append(ckUserNode(issue));
@@ -728,8 +795,10 @@ function filteredTickets() {
   const assigneeFilter = $("filter-assignee").value;
 
   return visibleIssues().filter((issue) => {
-    if (stateFilter === "open" && !isOpen(issue)) return false;
-    if (stateFilter === "done" && isOpen(issue)) return false;
+    if (stateFilter === "withus" && !isWithUs(issue)) return false;
+    if (stateFilter === "waiting" && !isWaiting(issue)) return false;
+    if (stateFilter === "done" && !isResolved(issue)) return false;
+    if (stateFilter === "delivered" && !isDelivered(issue)) return false;
     if (topic && issue.topic !== topic) return false;
     if (priority && issue.priority !== priority) return false;
     if (ckFilter && ckUserName(issue) !== ckFilter) return false;
@@ -803,7 +872,7 @@ function renderTickets() {
     tr.append(ckCell);
 
     const statusCell = document.createElement("td");
-    statusCell.append(el("span", `chip status-${issue.statusCategory}`, issue.status));
+    statusCell.append(statusChip(issue));
     tr.append(statusCell);
 
     const priorityCell = document.createElement("td");
@@ -821,7 +890,7 @@ function renderTickets() {
     tr.append(workCell);
 
     const days = ageDays(issue);
-    tr.append(cell("date", days == null ? "—" : isOpen(issue) ? `${days}d open` : `${days}d`));
+    tr.append(cell("date", days == null ? "—" : isResolved(issue) ? `${days}d` : `${days}d so far`));
 
     body.append(tr);
   }
@@ -896,15 +965,16 @@ function renderPeople() {
 
   const scoped = visibleIssues().filter(peopleWindowFilter());
   const unattributed = scoped.filter((i) => (axis === "assignee" ? !i.assignee : !i.ckUser)).length;
+  const settled = scoped.filter(hasSettledSla).length;
   $("people-note").textContent =
     `${scoped.length} tickets · ${rows.length} ${axis === "assignee" ? "assignees" : "CK users"}` +
     (unattributed ? ` · ${unattributed} with no ${axis === "assignee" ? "assignee" : "CK user"} set` : "") +
-    " · work time is Jira SLA working hours, not calendar time";
+    ` · timings from ${settled} tickets whose SLA clock has stopped · work time is working hours, not calendar time`;
 
   if (!rows.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 9;
+    td.colSpan = 11;
     td.className = "empty-state";
     td.textContent = "No tickets in this window.";
     tr.append(td);
@@ -924,15 +994,25 @@ function renderPeople() {
     if (isMe) personCell.append(el("span", "tag-me", "you"));
     tr.append(personCell);
 
-    tr.append(numCell(row.resolved, "strong"));
-    tr.append(numCell(row.open));
+    tr.append(numCell(row.delivered, "strong"));
+    tr.append(numCell(row.closed));
+    // Parked with Q2 or the client: our part finished, so it counts as
+    // delivered but is worth seeing on its own.
+    const waitCell = numCell(row.waiting);
+    if (row.waiting) waitCell.style.color = "var(--progress)";
+    tr.append(waitCell);
+    const withUsCell = numCell(row.withUs);
+    if (row.withUs) withUsCell.style.cssText += ";color:var(--todo);font-weight:600";
+    tr.append(withUsCell);
+
     tr.append(cell("date", formatWorkTime(row.medianSlaMs)));
     tr.append(cell("date", formatWorkTime(row.p90SlaMs)));
     tr.append(cell("date", formatWorkTime(row.medianFirstResponseMs)));
 
     const breachCell = cell("date", row.breachRate == null ? "—" : `${Math.round(row.breachRate * 100)}%`);
     if (row.breachRate != null && row.breachRate > 0.25) breachCell.style.color = "var(--urgent)";
-    if (row.breached) breachCell.title = `${row.breached} of ${row.resolved} resolved tickets breached SLA`;
+    breachCell.title = `${row.breached} of ${row.measuredOn} settled tickets breached SLA` +
+      (row.breachingNow ? `. ${row.breachingNow} more are past target on a clock that is still running.` : "");
     tr.append(breachCell);
 
     tr.append(cell("date", row.medianCalendarMs == null ? "—" : formatDuration(row.medianCalendarMs)));
@@ -968,7 +1048,7 @@ function renderPeopleCharts(rows, axis) {
     data: {
       labels: named.map((r) => r.key),
       datasets: [{
-        data: named.map((r) => r.resolved),
+        data: named.map((r) => r.delivered),
         backgroundColor: named.map((r, i) => (state.meta?.me && r.email === state.meta.me ? "#17875b" : PALETTE[i % PALETTE.length])),
         borderRadius: 3,
       }],
@@ -986,7 +1066,7 @@ function renderPeopleCharts(rows, axis) {
   const worktimeNote = $("worktime-note");
   if (worktimeNote) {
     worktimeNote.textContent = omitted.length
-      ? `${omitted.map((r) => `${r.key} (${r.measuredOn})`).join(", ")} left out — fewer than ${MIN_SAMPLE} resolved tickets.`
+      ? `${omitted.map((r) => `${r.key} (${r.measuredOn})`).join(", ")} left out — fewer than ${MIN_SAMPLE} tickets with a settled SLA clock.`
       : "";
   }
 
@@ -1355,7 +1435,7 @@ function renderDrawer(detail) {
   head.append(title);
 
   const chips = el("div", "chips");
-  chips.append(el("span", `chip status-${detail.statusCategory}`, detail.status));
+  chips.append(statusChip(detail));
   if (detail.priority && detail.priority !== "None") chips.append(el("span", `chip prio-${detail.priority}`, detail.priority));
   chips.append(el("span", "chip topic", detail.topicLabel));
   for (const secondary of detail.secondaryTopics || []) chips.append(el("span", "chip", `also ${secondary.label.toLowerCase()}`));
@@ -1782,7 +1862,7 @@ function goHome() {
   state.selectedLoan = null;
   state.onlyMine = false;
   state.ticketSort = { column: "created", direction: -1 };
-  state.peopleSort = { column: "resolved", direction: -1 };
+  state.peopleSort = { column: "delivered", direction: -1 };
 
   $("mine-toggle").setAttribute("aria-pressed", "false");
   $("loan-search").value = "";
@@ -1863,7 +1943,7 @@ function init() {
       const sort = state.peopleSort;
       // Counts and loans read best high-first; durations and breach rates read
       // best low-first, since "fast" is the interesting end.
-      const defaultDirection = ["resolved", "open", "distinctLoans"].includes(column) ? -1 : 1;
+      const defaultDirection = ["delivered", "closed", "waiting", "withUs", "distinctLoans"].includes(column) ? -1 : 1;
       sort.direction = sort.column === column ? -sort.direction : defaultDirection;
       sort.column = column;
       renderPeople();
@@ -1898,6 +1978,9 @@ function init() {
       renderTickets();
     };
   }
+
+  // Table headers carry their full form from the same glossary the cards use.
+  for (const node of document.querySelectorAll("[data-term]")) tip(node, node.dataset.term);
 
   $("scrim").onclick = closeDrawer;
   $("chart-scrim").onclick = closeChartZoom;

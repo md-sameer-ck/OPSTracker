@@ -656,3 +656,16 @@ tbody tr.is-me-row td:first-child { padding-left: 15px; }
 .chart-modal-body > .rank-list { max-width: 900px; margin: 0 auto; }
 
 #chart-scrim { z-index: 50; }
+
+/* ── waiting state & glossary hints ──────────────────────────────────── */
+
+/* "Waiting on others" is deliberately not the same colour as in-progress: the
+   whole point is that it is not our backlog. */
+.chip.status-waiting { background: var(--progress-soft); color: var(--progress); border-color: transparent; }
+.tl-item[data-cat="waiting"]::after { border-color: var(--progress); background: var(--progress); }
+
+/* A term whose full form appears on hover. Understated — a dotted underline
+   readers already know, not a badge on every other word. */
+.has-tip { text-decoration: underline dotted var(--border-strong); text-underline-offset: 3px; cursor: help; }
+.has-tip:hover { text-decoration-color: var(--accent); color: var(--text); }
+thead th.has-tip:hover { color: var(--accent-text); }

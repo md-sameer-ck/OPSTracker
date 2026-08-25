@@ -48,6 +48,10 @@ own Components for comparison.
 
 **Only mine.** One toggle narrows every number on every tab to your tickets.
 
+**Hover anything abbreviated.** SLA, p90, work time, "with us", "delivered" —
+every term with a dotted underline carries its full form on hover, defined once
+so the wording cannot drift between a card, a table header and a ticket panel.
+
 **Any chart, bigger.** Click a chart's title to open it full-screen with every
 label spelled out — click outside or press Escape to come back. The ranked lists
 open the same way, showing the whole list rather than the top dozen the card has
@@ -174,6 +178,39 @@ group, and hiding it would flatter everyone's individual numbers.
 **Only mine** needs to know who you are, which the shared token cannot tell it.
 Set `CK_ME_EMAIL` to the email on your Jira account — the same one the CK User
 field holds.
+
+## What "open" means
+
+Jira's status categories only know *new / in progress / done*, which lumps
+together two situations that mean opposite things for this desk:
+
+| | Statuses | What it means |
+|---|---|---|
+| **Still with us** | To Do, Acknowledged, In Progress | We owe work. This is the real backlog. |
+| **Waiting on others** | Q2, Pending, Waiting on Customer | Our work is finished. The ticket is parked with Q2 support or with the client. |
+| **Closed** | Done, Declined, Moved to Backlog | Resolved in Jira. |
+
+Counting "waiting" as open badly misreports the desk. On the live project, of
+the 38 outstanding production issues **26 are waiting on somebody else and only
+12 are genuinely ours** — and 24 of those 26 are breaching SLA purely because
+the clock keeps running while we wait.
+
+So the dashboard splits them. "Still with us" is the backlog figure, "Waiting on
+others" sits beside it, and the throughput table counts a parked ticket as
+**delivered** by whoever handled it, alongside a separate column for how many of
+their tickets are parked. A status added in Jira later ("Waiting on Vendor",
+"On Hold") is recognised without a code change.
+
+### Settled clocks only
+
+Every median, percentile and breach rate is computed over tickets whose **SLA
+clock has stopped**. A ticket sitting in Q2 for a year has a number that is
+still climbing; folding it in would make whoever handled it look slower every
+day nobody touches the ticket.
+
+Tickets past target on a still-running clock are not silently dropped either —
+they are reported separately as *breaching now*, because that is a live problem,
+just not a finished measurement.
 
 ## Two different clocks
 
@@ -339,8 +376,9 @@ classification cannot drift between what the index says and what a ticket says.
 
 ### Tests
 
-`npm test` — 36 cases over reference normalisation, text cleanup,
-classification, fix extraction, ticket cross-references and throughput maths. Every string in them is real text from the
+`npm test` — 41 cases over reference normalisation, text cleanup,
+classification, fix extraction, ticket cross-references, ticket state and
+throughput maths. Every string in them is real text from the
 OPS project, which is the point: the heuristics are tuned to how this team
 actually writes, so the tests have to be too. The one that matters most asserts
 that a sign-off is never mistaken for a fix.
