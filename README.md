@@ -103,30 +103,177 @@ quietly disagreeing with it.
 Both exclusions have a server-side escape hatch — `?featureRequests=1` and
 `?serviceRequests=1` — and neither is exposed in the UI.
 
-## Setup
+## Running it locally
+
+### What you need
+
+**Node 18 or newer**, and nothing else. There is no build step, no bundler and
+no `npm install` — the project has no runtime dependencies, and the only
+third-party code is Chart.js, vendored at `site/vendor/chart.umd.js` (MIT).
 
 ```bash
-cp .env.example .env      # then fill in the three ATLASSIAN_* values
-npm run dev               # http://localhost:8888
+node --version    # v18.0.0 or newer
 ```
 
-No dependencies to install — the only third-party code is Chart.js, vendored at
-`site/vendor/chart.umd.js` (MIT). `npm test` runs the logic tests.
+### 1. Get a Jira API token
 
-On Netlify: point it at this repo, set the same variables under **Site settings
-→ Environment variables**, and deploy. `netlify.toml` already publishes `site/`
-and maps `/api/*` to the functions.
+The dashboard reads Jira as you, over the REST API.
 
-| Variable | |
+1. Go to **[id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)**
+2. **Create API token**, give it a label like `opstracker`
+3. Copy it now — Atlassian will not show it again
+
+A **read-only** account is enough for everything except saving a fix summary,
+which posts a comment and so needs permission to comment on the project.
+
+### 2. Configure
+
+```bash
+git clone https://github.com/md-sameer-ck/OPSTracker.git
+cd OPSTracker
+cp .env.example .env
+```
+
+Then edit `.env`:
+
+```ini
+ATLASSIAN_DOMAIN=your-team.atlassian.net
+ATLASSIAN_EMAIL=you@yourcompany.com
+ATLASSIAN_TOKEN=ATATT3xFfGF0...
+OPS_PROJECT_KEY=OPS
+CK_ME_EMAIL=you@yourcompany.com
+```
+
+| Variable | Required | |
+|---|---|---|
+| `ATLASSIAN_DOMAIN` | yes | Host only — **no** `https://`, no trailing slash. It is the host in the URL when you browse Jira: `https://`**`your-team.atlassian.net`**`/browse/OPS-884`. |
+| `ATLASSIAN_EMAIL` | yes | The account the token belongs to. Not a display name. |
+| `ATLASSIAN_TOKEN` | yes | From step 1. |
+| `OPS_PROJECT_KEY` | no | Defaults to `OPS`. |
+| `CK_ME_EMAIL` | no | Who **Only mine** means. Needed because the Jira login is a shared desk account, so the app cannot work out who you are from the token — see [Who actually worked it](#who-actually-worked-it). Match the email on your Jira account, which is what the CK User field holds. |
+
+`.env` is gitignored. Never commit it.
+
+### 3. Run
+
+```bash
+npm run dev
+```
+
+```
+loaded .env
+OPSTracker dev server: http://localhost:8888
+```
+
+Open **http://localhost:8888**. The first load pages the whole project out of
+Jira — around **ten seconds** for ~850 tickets, since each one carries its SLA
+cycles, custom fields and issue links. That cost is paid once: it is cached
+server-side, then in your browser, so every load after it comes back in well
+under a second. See [Caching](#caching-and-not-hammering-jira).
+
+**If 8888 is already taken** — usually another copy of this server still running
+from an earlier session — it steps up to the next free port instead of failing,
+and says so:
+
+```
+port 8888 is in use — trying 8889
+
+  ⚠  8888 was busy — this server is on 8889, not 8888.
+
+OPSTracker dev server: http://localhost:8889
+```
+
+Read that line rather than assuming 8888: the usual way to lose ten minutes here
+is to keep reloading a stale tab on the old port. It tries ten ports before
+giving up. To pin one yourself, `PORT=9000 npm run dev` — which also falls
+forward if 9000 is busy.
+
+### 4. Run the tests
+
+```bash
+npm test
+```
+
+41 cases over reference normalisation, text cleanup, classification, fix
+extraction, ticket cross-references, ticket state and throughput maths. No
+network and no credentials — they run against fixed strings taken from real
+tickets.
+
+## While you are working on it
+
+**Editing a Netlify function** (`netlify/functions/*.js`) takes effect on the
+next request — the dev server re-imports a function module whenever its file
+changes on disk, so there is no restart.
+
+**Editing the site** (`site/*`) just needs a browser reload.
+
+**But the browser caches the index for 10 minutes**, which is exactly what you
+want in use and occasionally not what you want mid-change. If you have altered
+what `ops-issues.js` returns and the page still shows the old shape, click
+**Refresh** in the header — it clears the browser copy and re-fetches. Changing
+`CACHE_VERSION` in `site/app.js` also invalidates every stored copy, which is
+what to do if you change the record shape for real.
+
+### Looking at the UI without a Jira token
+
+Useful for working on the front end, or for showing someone the dashboard
+before they have credentials.
+
+```bash
+# once, with credentials available, save a Jira search response to a file
+node scripts/make-fixture.js path/to/jira-search-export.json > data/demo-index.json
+
+# then, with no .env needed at all
+DEMO_INDEX=data/demo-index.json npm run dev
+```
+
+The index is served from the fixture. Opening a ticket still calls Jira, so in
+demo mode a ticket panel will report the missing credentials unless the fixture
+also carries that ticket's thread — which is deliberate, since inventing a
+thread would be worse than saying so.
+
+`data/` is gitignored: fixtures hold real ticket text, so generate your own
+rather than committing one.
+
+### Optional: the real Netlify runtime
+
+The included dev server exists so that nothing has to be installed globally. If
+you would rather run the actual Netlify environment:
+
+```bash
+npm install -g netlify-cli
+netlify dev
+```
+
+`netlify.toml` already publishes `site/` and maps `/api/*` to the functions, so
+both routes behave identically.
+
+## When it will not start
+
+| What you see | What it means |
 |---|---|
-| `ATLASSIAN_DOMAIN` | `your-team.atlassian.net` — host only, no `https://` |
-| `ATLASSIAN_EMAIL` | the account the API token belongs to |
-| `ATLASSIAN_TOKEN` | from [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens) |
-| `OPS_PROJECT_KEY` | optional, defaults to `OPS` |
-| `CK_ME_EMAIL` | optional; who "Only mine" means, since the Jira login is shared |
+| `no .env found` on startup | The page loads but shows a red banner naming the missing variables. Copy `.env.example` to `.env`. |
+| `Server is missing ATLASSIAN_DOMAIN, …` | Those variables are absent or empty. In `.env`, check there are no quotes or trailing spaces. |
+| `Jira rejected the credentials (401)` | Wrong email, or a revoked/mistyped token. The email must be the account the token was created under. |
+| `The Jira account lacks permission for this (403)` | The account cannot see the project. Check it has access to `OPS` in Jira. |
+| `Could not reach Jira: {"errorMessage": "Site temporarily unavailable"}` | Almost always a wrong `ATLASSIAN_DOMAIN`. Atlassian answers *any* unclaimed `*.atlassian.net` name this way rather than refusing the connection, so a typo in the tenant looks like an outage. Check the host against the URL in your browser. |
+| `Could not reach Jira: fetch failed` | The host does not resolve at all. `ATLASSIAN_DOMAIN` must be the bare host — no `https://`, no path, no trailing slash. |
+| `does not exist, or the account cannot see it` on a ticket | Correct credentials, but that issue key is not visible to this account. |
+| `port 8888 is in use — trying 8889` | Not an error. Another server is already on 8888, so this one moved up. Open the port it prints. |
+| `Ports 8888–8897 are all in use` | Ten consecutive ports are occupied, which usually means a pile of servers left running. `pkill -f dev-server.js`, or pick a free one with `PORT=9000 npm run dev`. |
+| Empty dashboard, no error | The project has no tickets matching the filters — everything was excluded as a feature or service request. See [Only production issues](#only-production-issues). |
+| A read-only token, and saving a summary fails | Expected: writing a note posts a Jira comment. Use an account that can comment. |
 
-A read-only token is enough for everything except saving summaries, which needs
-permission to comment.
+## Deploying
+
+On Netlify: point a site at this repo and set the same variables under **Site
+settings → Environment variables**. `netlify.toml` handles the rest — it
+publishes `site/` and maps `/api/*` to `netlify/functions/`. There is no build
+command to configure.
+
+The five-minute server-side cache lives in the warm function container, so
+several people clicking around share one build of the index rather than each
+paying for their own.
 
 ## How a loan gets found
 
@@ -374,34 +521,24 @@ scripts/
 `site/lib/` is imported by both the browser and the functions, so extraction and
 classification cannot drift between what the index says and what a ticket says.
 
-### Tests
+### About the tests
 
-`npm test` — 41 cases over reference normalisation, text cleanup,
-classification, fix extraction, ticket cross-references, ticket state and
-throughput maths. Every string in them is real text from the
-OPS project, which is the point: the heuristics are tuned to how this team
-actually writes, so the tests have to be too. The one that matters most asserts
-that a sign-off is never mistaken for a fix.
-
-### Looking at it without a Jira token
-
-```bash
-node scripts/make-fixture.js path/to/jira-search-export.json > data/demo-index.json
-DEMO_INDEX=data/demo-index.json npm run dev
-```
-
-`data/` is gitignored — fixtures hold real ticket text, so generate your own
-rather than committing one.
+Running them is covered in [Run the tests](#4-run-the-tests). What matters about
+them is that every string in them is real text from the OPS project — the
+heuristics are tuned to how this team actually writes, so the tests have to be
+too. The ones carrying the most weight assert that a sign-off is never mistaken
+for a fix, and that a ticket parked with Q2 is never counted as our backlog.
 
 ## Caching, and not hammering Jira
 
-Building the index means paging the whole project out of Jira — about five
-seconds and one full pass — so re-fetching it on every page load is both slow and
-the surest way to meet a rate limit. Three layers stop that:
+Building the index means paging the whole project out of Jira — roughly ten
+seconds and one full pass over ~850 tickets — so re-fetching it on every page
+load is both slow and the surest way to meet a rate limit. Three layers stop
+that:
 
 1. **In the browser.** The index is stored in `localStorage` (~1 MB of a ~5 MB
    budget) and painted immediately on load. Inside 10 minutes it is served with
-   **no request at all** — a reload costs ~0.6 seconds and zero Jira traffic.
+   **no request at all** — a reload costs ~0.6 seconds and makes zero requests.
 2. **Conditional requests.** Past that, the browser asks with `If-None-Match`.
    An unchanged project answers **304, no body**, in about 10 ms.
 3. **On the server.** A five-minute in-memory cache in the warm function

@@ -120,6 +120,50 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`OPSTracker dev server: http://localhost:${PORT}`);
-});
+// If the port is taken — almost always another copy of this server still
+// running from an earlier session — step up to the next one rather than dying
+// with EADDRINUSE. The chosen port is printed prominently, because the failure
+// mode of quietly moving is somebody staring at a stale tab on 8888.
+const MAX_PORT_ATTEMPTS = 10;
+
+function start(port, attempt = 0) {
+  const onError = (error) => {
+    server.removeListener("listening", onListening);
+
+    if (error.code !== "EADDRINUSE") {
+      console.error(
+        error.code === "EACCES"
+          ? `Not allowed to bind port ${port}. Ports below 1024 need elevated privileges — try PORT=8888.`
+          : `Could not start the server: ${error.message}`
+      );
+      process.exit(1);
+    }
+
+    if (attempt >= MAX_PORT_ATTEMPTS - 1) {
+      console.error(
+        `Ports ${PORT}–${port} are all in use. Stop whatever is holding them, ` +
+          `or pick one explicitly with PORT=9000 npm run dev.`
+      );
+      process.exit(1);
+    }
+
+    console.log(`port ${port} is in use — trying ${port + 1}`);
+    start(port + 1, attempt + 1);
+  };
+
+  const onListening = () => {
+    server.removeListener("error", onError);
+    if (port !== PORT) {
+      console.log(`\n  ⚠  ${PORT} was busy — this server is on ${port}, not ${PORT}.`);
+    }
+    console.log(`\nOPSTracker dev server: http://localhost:${port}\n`);
+  };
+
+  // once() rather than on(): each attempt installs its own pair and the losing
+  // handler is removed above, so retries cannot accumulate listeners.
+  server.once("error", onError);
+  server.once("listening", onListening);
+  server.listen(port);
+}
+
+start(PORT);
