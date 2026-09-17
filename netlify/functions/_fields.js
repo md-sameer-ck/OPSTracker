@@ -12,6 +12,7 @@
 import { extractIssueKeys, extractRefs } from "../../site/lib/refs.js";
 import { classify } from "../../site/lib/taxonomy.js";
 import { fieldToText, truncate } from "../../site/lib/text.js";
+import { deriveHistory } from "./_changelog.js";
 
 export const FIELD = {
   CK_USER: "customfield_10067",          // "CK User"  — user picker
@@ -142,6 +143,10 @@ export function normaliseIssue(issue, { full = false } = {}) {
   const projectKey = issue.key?.split("-")[0] || "OPS";
   const mentions = extractIssueKeys(`${summary}\n${description}`, projectKey, issue.key);
 
+  // Only available when the caller asked Jira to expand changelog. Without it
+  // the ticket still renders; the time-in-status figures are simply absent.
+  const history = issue.changelog ? deriveHistory(issue) : null;
+
   return {
     key: issue.key,
     summary,
@@ -192,6 +197,9 @@ export function normaliseIssue(issue, { full = false } = {}) {
 
     links,
     mentions,
+
+    history,
+    reportedPriority: history?.reportedPriority || fields.priority?.name || null,
 
     topic: primary.id,
     topicLabel: primary.label,

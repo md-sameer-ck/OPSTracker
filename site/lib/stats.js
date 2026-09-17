@@ -39,60 +39,111 @@ export function percentile(numbers, p) {
 
 // ── what state a ticket is really in ──────────────────────────────────
 //
-// Jira's status categories only know "new / in progress / done", which lumps
-// together two situations that mean opposite things for this team:
+// The desk's workflow, as the team runs it:
 //
-//   With us      To Do, Acknowledged, In Progress   — we still owe work
-//   Waiting      Q2, Pending, Waiting on Customer   — our work is done; the
-//                                                     ball is with Q2 support
-//                                                     or with the client
+//   queued     To Do                 raised, nobody has picked it up
+//   triage     Acknowledged          read and analysed, work not started
+//   active     In Progress           the actual work
+//   onhold     Pending               work remaining, parked for now
+//   signoff    Waiting on Customer   our work is done, awaiting client sign-off
+//   escalated  Q2                    escalated to the product help desk
+//   closed     Done / Declined / Moved to Backlog
 //
-// Treating "waiting" as open badly misreports the desk. On the live project 26
-// of the 38 outstanding production issues are waiting on somebody else, and 24
-// of those are breaching SLA purely because the clock keeps running while we
-// wait. Counting that as our backlog, or our breach, is simply wrong.
+// Jira's own status categories collapse all of this into new/indeterminate/done,
+// which is why the dashboard classifies by name instead.
 
-const WAITING_STATUSES = new Set([
-  "q2",
-  "pending",
-  "waiting on customer",
-  "waiting for customer",
-  "waiting on client",
-  "waiting for client",
-  "waiting for support",
-  "on hold",
-  "blocked",
-]);
+export const WORK_STATUS = "In Progress";
+export const TRIAGE_STATUS = "Acknowledged";
+
+export function outcome(issue) {
+  if (issue?.statusCategory === "done") return "closed";
+  const name = String(issue?.status || "").trim().toLowerCase();
+  if (/\bq2\b/.test(name)) return "escalated";
+  if (/^waiting\b/.test(name)) return "signoff";
+  if (/^(pending|on hold|blocked)\b/.test(name)) return "onhold";
+  if (/^in progress\b/.test(name)) return "active";
+  if (/^acknowledged\b/.test(name)) return "triage";
+  return "queued";
+}
+
+export const OUTCOME_LABEL = {
+  closed: "Closed",
+  signoff: "Awaiting sign-off",
+  escalated: "Escalated to Q2",
+  onhold: "On hold",
+  active: "In progress",
+  triage: "Triage",
+  queued: "Not picked up",
+};
 
 /**
- * Whether a status means "parked with somebody outside the team". Matched on a
- * known list first, then loosely, so a status added in Jira later ("Waiting on
- * Vendor") lands in the right bucket without a code change.
+ * Our work is finished: closed, or with the client for sign-off.
+ *
+ * Q2 is deliberately NOT delivered — escalating to the product help desk means
+ * we could not fix it, and counting it as delivered would flatter the numbers
+ * in exactly the case worth seeing. On hold is not delivered either: there is
+ * work remaining on it.
  */
-export function isWaitingStatus(status) {
-  const name = String(status || "").trim().toLowerCase();
-  if (!name) return false;
-  if (WAITING_STATUSES.has(name)) return true;
-  return /^(waiting\b|pending\b|blocked\b|on hold\b)/.test(name) || /\bq2\b/.test(name);
-}
-
-/** "done" | "waiting" | "active" */
-export function ticketState(issue) {
-  if (issue?.statusCategory === "done") return "done";
-  if (isWaitingStatus(issue?.status)) return "waiting";
-  return "active";
-}
-
-/** Still owed work by us. This is what "open" should mean on a dashboard. */
-export const isWithUs = (issue) => ticketState(issue) === "active";
-/** Parked with Q2 or the client — our part is finished. */
-export const isWaiting = (issue) => ticketState(issue) === "waiting";
-/** Our work is finished, whether the ticket is closed or parked elsewhere. */
-export const isDelivered = (issue) => ticketState(issue) !== "active";
-
+export const isDelivered = (issue) => ["closed", "signoff"].includes(outcome(issue));
+export const isEscalated = (issue) => outcome(issue) === "escalated";
+/** Sitting on our side of the fence, waiting on us. */
+export const isWithUs = (issue) => ["queued", "triage", "active", "onhold"].includes(outcome(issue));
+/** Parked with somebody else — the client, or Q2. */
+export const isWaiting = (issue) => ["signoff", "escalated"].includes(outcome(issue));
 export const isResolved = (issue) => issue?.statusCategory === "done";
-// Kept for the places that genuinely mean "not closed in Jira".
 export const isOpen = (issue) => issue?.statusCategory !== "done";
+/** Currently being worked, for a work-in-progress count. */
+export const isInProgress = (issue) => outcome(issue) === "active";
+
+// Kept so older call sites keep meaning what they meant.
+export const ticketState = (issue) => {
+  const state = outcome(issue);
+  if (state === "closed") return "done";
+  return isWaiting(issue) ? "waiting" : "active";
+};
+
+// ── time actually spent ───────────────────────────────────────────────
+//
+// Summed across every visit to a status, because tickets bounce
+// In Progress → Pending → In Progress before they finish.
+//
+// ponytail: these are elapsed hours in a status, not working hours — a ticket
+// left In Progress over a weekend counts the weekend. Jira's SLA clock applies
+// the desk's working calendar but to the wrong scope (it keeps running through
+// Pending and Q2), so neither number is both right. Upgrade path if it matters:
+// intersect the In Progress intervals with a Europe/London 9–5 Mon–Fri calendar.
+
+const statusTime = (issue, status) => issue?.history?.statusMs?.[status] ?? null;
+
+/** Time in In Progress — the closest thing to effort this data supports. */
+export const workMs = (issue) => statusTime(issue, WORK_STATUS);
+/** Time in Acknowledged — read and analysed, but not yet worked. */
+export const triageMs = (issue) => statusTime(issue, TRIAGE_STATUS);
+
+/** Time parked with somebody else, or on hold. Not our work. */
+export function stoppedMs(issue) {
+  const durations = issue?.history?.statusMs;
+  if (!durations) return null;
+  let total = 0;
+  for (const [status, ms] of Object.entries(durations)) {
+    if (/^(pending|waiting|q2|on hold|blocked)/i.test(status)) total += ms;
+  }
+  return total;
+}
+
+/** Time before anyone moved it at all. */
+export const firstTouchMs = (issue) => issue?.history?.timeToFirstTouchMs ?? null;
+export const reopenCount = (issue) => issue?.history?.reopens ?? 0;
+
+/**
+ * This person's own share of the work on a ticket.
+ *
+ * A ticket handed over mid-flight should credit each person with their own
+ * stretch. Without this, whoever closes it inherits every hour spent on it and
+ * whoever did the first half gets none.
+ */
+export const workByOwnerMs = (issue, owner) => issue?.history?.workByOwner?.[owner] ?? null;
+export const workOwners = (issue) => Object.keys(issue?.history?.workByOwner || {});
 
 /**
  * Whether this ticket's SLA clock has stopped — the only case where its elapsed
@@ -159,39 +210,53 @@ export const toHours = (ms) => (ms == null ? null : Math.round((ms / HOUR_MS) * 
  * dropped: hiding it would flatter every individual's numbers.
  */
 export const UNASSIGNED = "— not set —";
-export const ckUserName = (issue) => issue.ckUser?.name || UNASSIGNED;
+export const ckUserName = (issue) => (isCkAccount(issue?.ckUser) ? issue?.ckUser?.name : null) || UNASSIGNED;
 export const assigneeName = (issue) => issue.assignee?.name || UNASSIGNED;
 
 /**
  * Per-person throughput. `keyOf` picks the axis — CK User or assignee — so the
  * same table serves both without a second implementation.
  */
-export function throughputBy(issues, keyOf, { now = Date.now() } = {}) {
+function blankGroup(key) {
+  return {
+    key,
+    total: 0,
+    delivered: 0,
+    closed: 0,
+    waiting: 0,
+    withUs: 0,
+    breached: 0,
+    breachingNow: 0,
+    escalated: 0,
+    contributed: 0,
+    reopens: 0,
+    wip: 0,
+    workTimes: [],
+    triageTimes: [],
+    slaTimes: [],
+    calendarTimes: [],
+    firstResponses: [],
+    topics: new Map(),
+    loans: new Set(),
+    lastActivity: null,
+    email: null,
+  };
+}
+
+export function throughputBy(issues, keyOf, { now = Date.now(), splitWork = false } = {}) {
   const groups = new Map();
+  const ensure = (key) => {
+    let group = groups.get(key);
+    if (!group) {
+      group = blankGroup(key);
+      groups.set(key, group);
+    }
+    return group;
+  };
 
   for (const issue of issues) {
     const key = keyOf(issue);
-    let group = groups.get(key);
-    if (!group) {
-      group = {
-        key,
-        total: 0,
-        delivered: 0,
-        closed: 0,
-        waiting: 0,
-        withUs: 0,
-        breached: 0,
-        breachingNow: 0,
-        slaTimes: [],
-        calendarTimes: [],
-        firstResponses: [],
-        topics: new Map(),
-        loans: new Set(),
-        lastActivity: null,
-        email: null,
-      };
-      groups.set(key, group);
-    }
+    const group = ensure(key);
 
     group.total += 1;
     group.email = group.email || issue.ckUser?.email || issue.assignee?.email || null;
@@ -204,17 +269,37 @@ export function throughputBy(issues, keyOf, { now = Date.now() } = {}) {
     const firstResponse = firstResponseMs(issue);
     if (firstResponse != null) group.firstResponses.push(firstResponse);
 
-    const state = ticketState(issue);
-    if (state === "done") group.closed += 1;
-    else if (state === "waiting") group.waiting += 1;
+    const state = outcome(issue);
+    if (state === "closed") group.closed += 1;
+    else if (state === "signoff") group.waiting += 1;
+    else if (state === "escalated") group.escalated += 1;
     else group.withUs += 1;
-    // Our work is finished on anything not still active — a ticket parked with
-    // Q2 was delivered by this person just as much as a closed one.
-    if (state !== "active") group.delivered += 1;
+    if (isDelivered(issue)) group.delivered += 1;
 
-    // Timings and breaches come only from settled SLA clocks. A ticket sitting
-    // in Q2 has a number that is still climbing; folding it in would make the
-    // person who handled it look slower every day nobody touches it.
+    // Work time comes from the status history, and only from finished tickets:
+    // a ticket still In Progress has a figure that is still climbing.
+    if (isDelivered(issue)) {
+      const triage = triageMs(issue);
+      if (triage != null) group.triageTimes.push(triage);
+
+      if (splitWork) {
+        // Each person is credited with the stretches they personally held. A
+        // handover therefore shows up as time for both, not all of it for
+        // whoever happened to close the ticket.
+        for (const [owner, ms] of Object.entries(issue.history?.workByOwner || {})) {
+          if (!(ms > 0)) continue;
+          const target = ensure(owner);
+          target.workTimes.push(ms);
+          if (owner !== key) target.contributed += 1;
+        }
+      } else {
+        const work = workMs(issue);
+        if (work != null) group.workTimes.push(work);
+      }
+    }
+    group.reopens += reopenCount(issue);
+    if (isInProgress(issue)) group.wip += 1;
+
     if (hasSettledSla(issue)) {
       group.slaTimes.push(slaElapsedMs(issue));
       if (slaBreached(issue)) group.breached += 1;
@@ -224,7 +309,7 @@ export function throughputBy(issues, keyOf, { now = Date.now() } = {}) {
       group.breachingNow += 1;
     }
 
-    if (state === "done") {
+    if (state === "closed") {
       const calendar = calendarMs(issue, now);
       if (calendar != null) group.calendarTimes.push(calendar);
     }
@@ -238,7 +323,17 @@ export function throughputBy(issues, keyOf, { now = Date.now() } = {}) {
       delivered: group.delivered,
       closed: group.closed,
       waiting: group.waiting,
+      escalated: group.escalated,
+      contributed: group.contributed,
+      totalWorkMs: group.workTimes.reduce((a, b) => a + b, 0),
+      meanWorkMs: group.workTimes.length ? group.workTimes.reduce((a, b) => a + b, 0) / group.workTimes.length : null,
       withUs: group.withUs,
+      wip: group.wip,
+      reopens: group.reopens,
+      medianWorkMs: median(group.workTimes),
+      p90WorkMs: percentile(group.workTimes, 90),
+      medianTriageMs: median(group.triageTimes),
+      workMeasuredOn: group.workTimes.length,
       breached: group.breached,
       breachingNow: group.breachingNow,
       breachRate: group.slaTimes.length ? group.breached / group.slaTimes.length : null,
@@ -257,29 +352,35 @@ export function throughputBy(issues, keyOf, { now = Date.now() } = {}) {
 
 /** Headline numbers for a set of tickets. */
 export function summarise(issues, { now = Date.now() } = {}) {
-  const closed = issues.filter((i) => ticketState(i) === "done");
-  const waiting = issues.filter((i) => ticketState(i) === "waiting");
-  const withUs = issues.filter((i) => ticketState(i) === "active");
+  const closed = issues.filter((i) => outcome(i) === "closed");
+  const signoff = issues.filter((i) => outcome(i) === "signoff");
+  const escalated = issues.filter(isEscalated);
+  const withUs = issues.filter(isWithUs);
+  const delivered = issues.filter(isDelivered);
 
-  // Every rate below is computed over settled SLA clocks only — see
-  // hasSettledSla. Mixing in still-running clocks would make the numbers drift
-  // upward on their own with nobody doing anything.
+  const workTimes = delivered.map(workMs).filter((v) => v != null);
   const settled = issues.filter(hasSettledSla);
-  const slaTimes = settled.map(slaElapsedMs);
   const breached = settled.filter(slaBreached).length;
 
   return {
     total: issues.length,
     closed: closed.length,
-    waiting: waiting.length,
+    signoff: signoff.length,
+    escalated: escalated.length,
+    waiting: signoff.length + escalated.length,
     withUs: withUs.length,
-    delivered: closed.length + waiting.length,
-    // Retained under the old name so nothing that still asks for "resolved"
-    // silently changes meaning: it has always meant closed in Jira.
+    wip: issues.filter(isInProgress).length,
+    delivered: delivered.length,
     resolved: closed.length,
     open: withUs.length,
-    medianSlaMs: median(slaTimes),
-    p90SlaMs: percentile(slaTimes, 90),
+    reopened: issues.filter((i) => reopenCount(i) > 0).length,
+    medianWorkMs: median(workTimes),
+    p90WorkMs: percentile(workTimes, 90),
+    medianTriageMs: median(issues.map(triageMs).filter((v) => v != null)),
+    medianFirstTouchMs: median(issues.map(firstTouchMs).filter((v) => v != null)),
+    workMeasuredOn: workTimes.length,
+    medianSlaMs: median(settled.map(slaElapsedMs)),
+    p90SlaMs: percentile(settled.map(slaElapsedMs), 90),
     medianCalendarMs: median(closed.map((i) => calendarMs(i, now)).filter((v) => v != null)),
     medianFirstResponseMs: median(issues.map(firstResponseMs).filter((v) => v != null)),
     breached,
@@ -289,5 +390,184 @@ export function summarise(issues, { now = Date.now() } = {}) {
     oldestWithUs: withUs.map((i) => i.created).filter(Boolean).sort()[0] || null,
     oldestOpen: withUs.map((i) => i.created).filter(Boolean).sort()[0] || null,
     withResolutionComments: issues.filter((i) => i.hasResolutionComments || i.resolutionComments).length,
+  };
+}
+
+// ── reporters, and who counts as a CK user ────────────────────────────
+
+export const reporterName = (issue) => issue?.reporter?.name || UNASSIGNED;
+
+// The CK User field occasionally holds a Folk2Folk person (Danny Learmont,
+// daniellearmont@folk2folk.com). They are not on the CloudKaptan side, so they
+// skew the throughput table — one ticket, a 1492h median, 100% breach. Matched
+// on the email domain rather than a name list so nobody has to maintain it.
+// A null email means an older CK account with no address on it, so those stay.
+const isCkAccount = (person) => !person?.email || person.email.endsWith("@cloudkaptan.com");
+
+/**
+ * Tickets raised per year, with a like-for-like year-to-date cut.
+ *
+ * Comparing a full year against a part year is the easy way to report a made-up
+ * drop, so each year carries both: `total` for the whole year and `ytd` counted
+ * only up to the same month and day as `asOf`.
+ */
+export function yearOnYear(issues, { asOf = new Date(), reporters = null } = {}) {
+  const wanted = reporters?.length ? new Set(reporters) : null;
+  const cutoffMonth = asOf.getMonth();
+  const cutoffDay = asOf.getDate();
+  const years = new Map();
+  const byReporter = new Map();
+
+  for (const issue of issues) {
+    if (!issue.created) continue;
+    const name = reporterName(issue);
+    if (wanted && !wanted.has(name)) continue;
+
+    const raised = new Date(issue.created);
+    const year = raised.getFullYear();
+    const inYtd =
+      raised.getMonth() < cutoffMonth ||
+      (raised.getMonth() === cutoffMonth && raised.getDate() <= cutoffDay);
+
+    if (!years.has(year)) {
+      years.set(year, { year, total: 0, ytd: 0, done: 0, open: 0, months: Array(12).fill(0), priority: new Map() });
+    }
+    const bucket = years.get(year);
+    bucket.total += 1;
+    if (inYtd) bucket.ytd += 1;
+    bucket.months[raised.getMonth()] += 1;
+    if (isResolved(issue)) bucket.done += 1;
+    else bucket.open += 1;
+    bucket.priority.set(issue.priority, (bucket.priority.get(issue.priority) || 0) + 1);
+
+    if (!byReporter.has(name)) byReporter.set(name, { name, years: new Map() });
+    const person = byReporter.get(name);
+    if (!person.years.has(year)) person.years.set(year, { total: 0, ytd: 0 });
+    const slot = person.years.get(year);
+    slot.total += 1;
+    if (inYtd) slot.ytd += 1;
+  }
+
+  return {
+    asOf,
+    years: [...years.values()].sort((a, b) => a.year - b.year),
+    reporters: [...byReporter.values()],
+  };
+}
+
+// ── who actually worked a ticket ──────────────────────────────────────
+//
+// Two fields are needed, not one. Atlassian seats are expensive, so the CK team
+// shares a single login — FOLK2FOLK CK DESK — and records the individual in the
+// CK User field. Folk2Folk's own staff (Danny Learmont, Andy Marsh, Stephanie
+// Skinner…) are assigned normally and have no CK User.
+//
+// Measured on the live project:
+//   assignee = shared desk   313 tickets, 288 with a CK User  (92%)
+//   assignee = named person  237 tickets,  10 with a CK User   (4%)
+//
+// So neither field alone answers "who worked this": grouping by assignee buries
+// the whole CK team under one row, and grouping by CK User drops every
+// Folk2Folk-handled ticket into "not set".
+
+const SHARED_DESK = /\bCK\s*(DESK|HELP\s*DESK)\b/i;
+export const isSharedDesk = (person) => SHARED_DESK.test(person?.name || "");
+
+/** The person who did the work: the assignee, unless that is the shared desk. */
+export function workedBy(issue) {
+  if (isSharedDesk(issue?.assignee)) {
+    const ck = ckUserName(issue);
+    // On the shared account with nobody named, the individual is unrecoverable;
+    // say that rather than crediting it to the desk as if it were a person.
+    return ck === UNASSIGNED ? "CK desk (no CK user set)" : ck;
+  }
+  return issue?.assignee?.name || UNASSIGNED;
+}
+
+/** Permalink to one comment, so a screenshot in a thread is one click away. */
+export const commentUrl = (jiraBase, issueKey, commentId) =>
+  jiraBase && issueKey && commentId
+    ? `${jiraBase}/browse/${issueKey}?focusedCommentId=${commentId}`
+    : null;
+
+// ── did the fix hold? ─────────────────────────────────────────────────
+
+/**
+ * How often a loan comes back after a ticket against it was closed.
+ *
+ * This is the question a fix is really judged on: a loan that returns a week
+ * after being "fixed" was not fixed. A return with the *same topic* is the
+ * strong signal — the same thing broke again, rather than the loan simply
+ * having another unrelated problem.
+ *
+ * Counting rule: for each closed ticket, look for a later ticket raised on the
+ * same loan. `withinDays` bounds it so a loan generating a new problem two
+ * years on is not read as a failed fix.
+ */
+export function loanRecurrence(issues, { withinDays = 90 } = {}) {
+  const windowMs = withinDays * DAY_MS;
+  const byLoan = new Map();
+
+  for (const issue of issues) {
+    for (const loan of issue.loans || []) {
+      if (!byLoan.has(loan)) byLoan.set(loan, []);
+      byLoan.get(loan).push(issue);
+    }
+  }
+
+  const loans = [];
+  let closedWithFollowUp = 0;
+  let closedSameTopic = 0;
+  let closedTotal = 0;
+
+  for (const [loan, tickets] of byLoan) {
+    const ordered = [...tickets].sort((a, b) => new Date(a.created) - new Date(b.created));
+    let returns = 0;
+    let sameTopicReturns = 0;
+    let closedHere = 0;
+
+    for (const ticket of ordered) {
+      if (!isResolved(ticket) || !ticket.resolved) continue;
+      closedHere += 1;
+      closedTotal += 1;
+      const closedAt = new Date(ticket.resolved).getTime();
+
+      const followUp = ordered.find((other) => {
+        if (other === ticket || !other.created) return false;
+        const raised = new Date(other.created).getTime();
+        return raised > closedAt && raised - closedAt <= windowMs;
+      });
+      if (!followUp) continue;
+
+      returns += 1;
+      closedWithFollowUp += 1;
+      if (followUp.topic === ticket.topic) {
+        sameTopicReturns += 1;
+        closedSameTopic += 1;
+      }
+    }
+
+    if (closedHere) {
+      loans.push({
+        loan,
+        tickets: ordered.length,
+        closed: closedHere,
+        returns,
+        sameTopicReturns,
+        returnRate: returns / closedHere,
+        lastRaised: ordered[ordered.length - 1]?.created || null,
+        topic: ordered[ordered.length - 1]?.topic || null,
+      });
+    }
+  }
+
+  return {
+    withinDays,
+    loans: loans.sort((a, b) => b.returns - a.returns || b.tickets - a.tickets),
+    closedTotal,
+    closedWithFollowUp,
+    closedSameTopic,
+    returnRate: closedTotal ? closedWithFollowUp / closedTotal : null,
+    sameTopicRate: closedTotal ? closedSameTopic / closedTotal : null,
   };
 }

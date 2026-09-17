@@ -108,13 +108,15 @@ export function scopedJql(extraClause) {
  * project with comments attached is several megabytes from Jira, and holding
  * all of it before reducing would be the expensive way to do this.
  */
-export async function searchAll({ jql, fields, onPage, pageSize = 100, maxPages = 40, credentials }) {
+export async function searchAll({ jql, fields, expand, onPage, pageSize = 100, maxPages = 40, credentials }) {
   let nextPageToken;
   let pages = 0;
   let total = 0;
 
   do {
-    const body = { jql, fields, maxResults: pageSize, ...(nextPageToken ? { nextPageToken } : {}) };
+    // `expand` must be a string here — this endpoint rejects the array form
+    // that the old /search accepted.
+    const body = { jql, fields, maxResults: pageSize, ...(expand ? { expand } : {}), ...(nextPageToken ? { nextPageToken } : {}) };
     const page = await jiraFetch("/rest/api/3/search/jql", { method: "POST", body, credentials });
     const issues = page?.issues || [];
     total += issues.length;

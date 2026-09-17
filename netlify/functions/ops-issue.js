@@ -27,7 +27,7 @@ export const handler = async (event) => {
 
   try {
     const issue = await jiraFetch(
-      `/rest/api/3/issue/${key.toUpperCase()}?fields=${ISSUE_FIELDS.join(",")}`,
+      `/rest/api/3/issue/${key.toUpperCase()}?fields=${ISSUE_FIELDS.join(",")}&expand=changelog`,
       { credentials }
     );
     const fields = issue.fields || {};

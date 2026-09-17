@@ -17,6 +17,11 @@
       <span class="tag" id="brand-tag">loans &amp; operational issues</span>
     </button>
     <div class="masthead-actions">
+      <select class="field" id="scope-select" style="width:auto" aria-label="Which tickets to show" title="Production issues are the developer view. Feature requests are the Product Owner / Scrum Master backlog.">
+        <option value="production">Production issues</option>
+        <option value="features">Feature requests</option>
+        <option value="all">Everything</option>
+      </select>
       <button class="icon-button toggle" id="mine-toggle" aria-pressed="false" hidden>Only mine</button>
       <span class="freshness" id="freshness"></span>
       <button class="icon-button" id="refresh" title="Re-fetch from Jira, bypassing the cache">↻ Refresh</button>
@@ -25,12 +30,17 @@
   </div>
 </header>
 
+<div class="loading-banner" id="loading-banner" hidden></div>
+
 <div class="kpis" id="kpis"></div>
 
 <nav class="tabs" role="tablist">
   <button class="tab" role="tab" id="tab-loans" aria-selected="true" aria-controls="view-loans">Loans</button>
   <button class="tab" role="tab" id="tab-tickets" aria-selected="false" aria-controls="view-tickets">All tickets</button>
+  <button class="tab" role="tab" id="tab-queues" aria-selected="false" aria-controls="view-queues">Queues</button>
   <button class="tab" role="tab" id="tab-people" aria-selected="false" aria-controls="view-people">Who's completing what</button>
+  <button class="tab" role="tab" id="tab-raised" aria-selected="false" aria-controls="view-raised">Who raised what</button>
+  <button class="tab" role="tab" id="tab-report" aria-selected="false" aria-controls="view-report">Year on year</button>
   <button class="tab" role="tab" id="tab-insights" aria-selected="false" aria-controls="view-insights">Recurring errors</button>
 </nav>
 
@@ -77,6 +87,7 @@
             <option value="">Any state</option>
             <option value="withus">Still with us</option>
             <option value="waiting">Waiting on others</option>
+            <option value="escalated">Escalated to Q2</option>
             <option value="delivered">Delivered (closed or waiting)</option>
             <option value="done">Closed only</option>
           </select>
@@ -88,6 +99,10 @@
             <option value="">Any ticket</option>
             <option value="with">Names a loan</option>
             <option value="without">No loan named</option>
+          </select>
+          <select class="field" id="filter-reopened" aria-label="Filter by reopened">
+            <option value="">Reopened or not</option>
+            <option value="1">Reopened only</option>
           </select>
           <button class="icon-button" id="filters-clear">Clear</button>
         </div>
@@ -117,6 +132,11 @@
     </div>
   </section>
 
+  <!-- ── Queues ────────────────────────────────────────────────────── -->
+  <section class="view" id="view-queues" role="tabpanel" aria-labelledby="tab-queues" hidden>
+    <div class="queue-grid" id="queue-grid"></div>
+  </section>
+
   <!-- ── Who's completing what ─────────────────────────────────────── -->
   <section class="view" id="view-people" role="tabpanel" aria-labelledby="tab-people" hidden>
     <div class="panel" style="margin-bottom:16px">
@@ -125,8 +145,10 @@
         <span class="spacer"></span>
         <div class="filters">
           <select class="field" id="people-axis" aria-label="Group by" style="width:auto">
+            <option value="worked">By who worked it</option>
             <option value="ck">By CK user</option>
             <option value="assignee">By Jira assignee</option>
+            <option value="reporter">By reporter</option>
           </select>
           <select class="field" id="people-window" aria-label="Time window" style="width:auto">
             <option value="0">All time</option>
@@ -146,11 +168,14 @@
               <th>Person</th>
               <th class="sortable has-tip" data-people-sort="delivered" data-term="delivered">Delivered</th>
               <th class="sortable has-tip" data-people-sort="closed" data-term="closed">Closed</th>
-              <th class="sortable has-tip" data-people-sort="waiting" data-term="waiting">Waiting</th>
-              <th class="sortable has-tip" data-people-sort="withUs" data-term="withUs">With us</th>
-              <th class="sortable has-tip" data-people-sort="medianSlaMs" data-term="workTime">Median work time</th>
-              <th class="sortable has-tip" data-people-sort="p90SlaMs" data-term="p90">p90 work time</th>
-              <th class="sortable has-tip" data-people-sort="medianFirstResponseMs" data-term="firstResponse">Median 1st response</th>
+              <th class="sortable has-tip" data-people-sort="waiting" data-term="waiting">Sign-off</th>
+              <th class="sortable has-tip" data-people-sort="escalated" data-term="escalated">Q2</th>
+              <th class="sortable has-tip" data-people-sort="wip" data-term="withUs">WIP</th>
+              <th class="sortable has-tip" data-people-sort="medianWorkMs" data-term="workTime">Median work</th>
+              <th class="sortable has-tip" data-people-sort="meanWorkMs" data-term="workTime">Avg work</th>
+              <th class="sortable num has-tip" data-people-sort="contributed" data-term="contributed">Helped on</th>
+              <th class="sortable has-tip" data-people-sort="medianTriageMs" data-term="triageTime">Median queue wait</th>
+              <th class="sortable has-tip" data-people-sort="reopens" data-term="reopens">Reopens</th>
               <th class="sortable has-tip" data-people-sort="breachRate" data-term="breached">SLA breached</th>
               <th class="sortable has-tip" data-people-sort="medianCalendarMs" data-term="calendarAge">Median calendar age</th>
               <th class="sortable has-tip" data-people-sort="distinctLoans" data-term="loans">Loans</th>
@@ -178,6 +203,76 @@
         <div class="sub">Who closed what, over time.</div>
         <div class="chart-box"><canvas id="chart-people-trend"></canvas></div>
       </div>
+    </div>
+  </section>
+
+  <!-- ── Who raised what ───────────────────────────────────────────── -->
+  <section class="view" id="view-raised" role="tabpanel" aria-labelledby="tab-raised" hidden>
+    <div class="panel" style="margin-bottom:16px">
+      <div class="panel-head">
+        <h2>Who raises the tickets</h2>
+        <span class="spacer"></span>
+        <span class="freshness" id="raised-note"></span>
+      </div>
+      <div class="table-scroll">
+        <table id="raised-table"><thead><tr>
+          <th>Reporter</th>
+          <th class="sortable num" data-raised-sort="total">Raised</th>
+          <th class="sortable num" data-raised-sort="open">Still open</th>
+          <th class="sortable num" data-raised-sort="highest">Highest / High</th>
+          <th class="sortable num has-tip" data-raised-sort="medianFirstTouch" data-term="firstTouch">Median first touch</th>
+          <th class="sortable num has-tip" data-raised-sort="medianWork" data-term="workTime">Median work</th>
+          <th class="sortable num has-tip" data-raised-sort="reopened" data-term="reopens">Reopened</th>
+          <th class="sortable num has-tip" data-raised-sort="escalated" data-term="escalated">Q2</th>
+          <th class="num">Most common topic</th>
+        </tr></thead><tbody id="raised-body"></tbody></table>
+      </div>
+    </div>
+    <div class="chart-grid">
+      <div class="chart-panel">
+        <h3>Tickets raised per reporter</h3>
+        <div class="sub">Who generates the operational load.</div>
+        <div class="chart-box tall"><canvas id="chart-raised"></canvas></div>
+      </div>
+      <div class="chart-panel">
+        <h3>What each reporter raises</h3>
+        <div class="sub">Topic mix for the busiest reporters — where each part of the business feels the pain.</div>
+        <div class="chart-box tall"><canvas id="chart-raised-topics"></canvas></div>
+      </div>
+      <div class="chart-panel">
+        <h3>Raised per month, by reporter</h3>
+        <div class="sub">Volume over time for the top reporters.</div>
+        <div class="chart-box"><canvas id="chart-raised-trend"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Year on year ──────────────────────────────────────────────── -->
+  <section class="view" id="view-report" role="tabpanel" aria-labelledby="tab-report" hidden>
+    <div class="panel report" id="report">
+      <div class="panel-head no-print">
+        <h2>Year-on-year comparison</h2>
+        <span class="spacer"></span>
+        <div class="filters">
+          <select class="field" id="report-year-a" aria-label="Baseline year" style="width:auto"></select>
+          <span class="freshness">vs</span>
+          <select class="field" id="report-year-b" aria-label="Comparison year" style="width:auto"></select>
+          <button class="icon-button toggle" id="report-all-years" aria-pressed="false" title="Show every year side by side instead of two">All years</button>
+          <button class="icon-button" id="report-csv">Export CSV</button>
+          <button class="primary-button" id="report-print">Save as PDF</button>
+        </div>
+      </div>
+      <div class="panel-head no-print" style="padding-top:0;border-bottom:1px solid var(--border);align-items:flex-start">
+        <label for="report-reporters" class="freshness" style="padding-top:6px">Reporters</label>
+        <select class="field" id="report-reporters" multiple size="6" style="max-width:340px"></select>
+        <div class="freshness" style="max-width:34ch">
+          Nothing selected means everyone. Ctrl/⌘-click to pick several — for a
+          finance-only view, select those reporters.
+          <button class="icon-button" id="report-reporters-clear" style="margin-top:6px">Clear selection</button>
+        </div>
+      </div>
+      <div id="report-body" class="report-body"></div>
+      <div class="chart-grid" id="report-charts" style="padding:0 22px 24px"></div>
     </div>
   </section>
 
@@ -212,6 +307,26 @@
         <h3>Repeat topics on the same loan</h3>
         <div class="sub">The same kind of problem hitting one loan more than once — the strongest signal of an unfixed root cause.</div>
         <div class="rank-list" id="rank-repeats"></div>
+      </div>
+
+      <div class="chart-panel wide">
+        <h3>Where the critical work lands</h3>
+        <div class="sub">Components by priority. Dark cells are where Highest and High tickets concentrate.</div>
+        <div class="table-scroll" style="max-height:360px"><div id="heatmap"></div></div>
+      </div>
+
+      <div class="chart-panel">
+        <h3>Did the fix hold?</h3>
+        <div class="sub">Loans that came back after a ticket against them was closed. The strongest evidence that a root cause is still there.</div>
+        <div id="recurrence"></div>
+      </div>
+
+      <div class="chart-panel wide">
+        <h3>Reporters, by how much work their tickets need</h3>
+        <div class="sub">Median wait before anyone can act, and how often their tickets come back. A long first-touch usually means the ticket arrived without enough to go on.</div>
+        <div class="table-scroll" style="max-height:340px"><table id="reporter-quality"><thead><tr>
+          <th>Reporter</th><th class="num">Raised</th><th class="num">Median first touch</th><th class="num">Median queue wait</th><th class="num">Reopened</th><th class="num">Escalated</th>
+        </tr></thead><tbody id="reporter-quality-body"></tbody></table></div>
       </div>
 
       <div class="chart-panel">

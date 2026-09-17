@@ -43,11 +43,18 @@ export const handler = async (event) => {
 
   const params = event.queryStringParameters || {};
   const wantsRefresh = params.refresh === "1";
-  // Feature requests are planned work, not production incidents, and are left
-  // out unless asked for — see PRODUCTION_REQUEST_TYPE in _fields.js.
-  const includeFeatureRequests = params.featureRequests === "1";
-  // Service requests are asks, not faults — see SERVICE_REQUEST_TYPE.
-  const includeServiceRequests = params.serviceRequests === "1";
+
+  // Three audiences, three scopes. "production" is the developers' view and the
+  // default; "features" is the Product Owner / Scrum Master backlog, which is a
+  // different job entirely; "all" is everything the queue holds.
+  //
+  // These are mutually exclusive on purpose. The old boolean added feature
+  // requests to the production set, which read as "show me the backlog" and
+  // delivered "show me both" — a toggle that looked like it had done nothing.
+  const scope = ["production", "features", "all"].includes(params.scope) ? params.scope : "production";
+  // Kept so an existing bookmark or saved URL still behaves.
+  const includeFeatureRequests = scope !== "production" || params.featureRequests === "1";
+  const includeServiceRequests = scope === "all" || params.serviceRequests === "1";
 
   let jql;
   try {
@@ -56,7 +63,7 @@ export const handler = async (event) => {
     return json(error.statusCode || 400, { error: error.message });
   }
 
-  const cacheKey = `${jql}::${includeFeatureRequests}::${includeServiceRequests}`;
+  const cacheKey = `${jql}::${scope}::${includeFeatureRequests}::${includeServiceRequests}`;
   const ifNoneMatch = event.headers?.["if-none-match"] || event.headers?.["If-None-Match"];
 
   if (!wantsRefresh && cache.payload && cache.key === cacheKey && Date.now() - cache.at < CACHE_TTL_MS) {
@@ -76,6 +83,9 @@ export const handler = async (event) => {
     const { truncated, total } = await searchAll({
       jql,
       fields: BASE_FIELDS,
+      // The status history rides along with the same request, so real
+      // time-in-status costs no extra round trips.
+      expand: "changelog",
       credentials,
       onPage: (page) => {
         for (const raw of page) {
@@ -85,11 +95,16 @@ export const handler = async (event) => {
           const opsType = record.opsType || "(not set)";
           opsTypeCounts[opsType] = (opsTypeCounts[opsType] || 0) + 1;
 
-          if (!includeFeatureRequests && record.requestType === FEATURE_REQUEST_TYPE) {
+          const isFeature = record.requestType === FEATURE_REQUEST_TYPE;
+          if (scope === "features" && !isFeature) {
             excludedFeatures += 1;
             continue;
           }
-          if (!includeServiceRequests && record.opsType === SERVICE_REQUEST_TYPE) {
+          if (scope !== "features" && !includeFeatureRequests && isFeature) {
+            excludedFeatures += 1;
+            continue;
+          }
+          if (scope !== "features" && !includeServiceRequests && record.opsType === SERVICE_REQUEST_TYPE) {
             excludedServiceRequests += 1;
             continue;
           }
@@ -110,6 +125,7 @@ export const handler = async (event) => {
       opsTypeCounts,
       productionRequestType: PRODUCTION_REQUEST_TYPE,
       featureRequestType: FEATURE_REQUEST_TYPE,
+      scope,
       includeFeatureRequests,
       includeServiceRequests,
       // Who "mine" means. The Jira login is a shared desk account, so the person

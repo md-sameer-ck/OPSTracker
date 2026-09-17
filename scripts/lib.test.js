@@ -12,7 +12,7 @@ import { fieldToText, truncate, firstSentences } from "../site/lib/text.js";
 import { classify } from "../site/lib/taxonomy.js";
 import { buildDigest, scoreComment, FIX_NOTE_MARKER } from "../site/lib/digest.js";
 import { extractIssueKeys } from "../site/lib/refs.js";
-import { formatDuration, formatWorkTime, throughputBy, ckUserName, summarise, UNASSIGNED, ticketState, isWithUs, isWaiting, isDelivered, hasSettledSla } from "../site/lib/stats.js";
+import { formatDuration, formatWorkTime, throughputBy, ckUserName, reporterName, summarise, UNASSIGNED, ticketState, isWithUs, isWaiting, isDelivered, hasSettledSla, yearOnYear, workedBy, isSharedDesk, commentUrl, outcome, isEscalated, workMs, triageMs, stoppedMs } from "../site/lib/stats.js";
 
 let passed = 0;
 let failed = 0;
@@ -337,8 +337,8 @@ test("SLA time prints in hours the way Jira does, calendar time in days", () => 
 
 test("throughput groups by CK user, because the Jira login is shared", () => {
   const issues = [
-    { key: "A", statusCategory: "done", ckUser: { name: "Md Sameer", email: "me@x" }, topic: "t", loans: ["LAI-1"], created: "2026-01-01T00:00:00Z", resolved: "2026-01-02T00:00:00Z", sla: { resolution: { elapsedMs: 3600000 }, firstResponse: { elapsedMs: 600000 } } },
-    { key: "B", statusCategory: "done", ckUser: { name: "Md Sameer", email: "me@x" }, topic: "t", loans: [], created: "2026-01-01T00:00:00Z", resolved: "2026-01-03T00:00:00Z", sla: { resolution: { elapsedMs: 7200000, breached: true }, firstResponse: {} } },
+    { key: "A", statusCategory: "done", ckUser: { name: "Md Sameer", email: "me@cloudkaptan.com" }, topic: "t", loans: ["LAI-1"], created: "2026-01-01T00:00:00Z", resolved: "2026-01-02T00:00:00Z", sla: { resolution: { elapsedMs: 3600000 }, firstResponse: { elapsedMs: 600000 } } },
+    { key: "B", statusCategory: "done", ckUser: { name: "Md Sameer", email: "me@cloudkaptan.com" }, topic: "t", loans: [], created: "2026-01-01T00:00:00Z", resolved: "2026-01-03T00:00:00Z", sla: { resolution: { elapsedMs: 7200000, breached: true }, firstResponse: {} } },
     { key: "C", statusCategory: "new", ckUser: null, topic: "t", loans: [], created: "2026-01-01T00:00:00Z", sla: { resolution: { elapsedMs: 999, ongoing: true } } },
   ];
   const rows = throughputBy(issues, ckUserName);
@@ -381,86 +381,152 @@ test("summarise counts breaches over settled clocks, not over closed tickets", (
 });
 
 
-console.log("\nstats — waiting on others is not our backlog");
+console.log("\nstats — the desk's actual workflow");
 
-test("every status this project uses lands in the right state", () => {
-  // Read off the live project. The middle group is the point: Jira calls them
-  // "in progress", but our work on them is finished.
+test("every status this project uses maps to the right outcome", () => {
   const cases = [
-    ["Done", "done", "done"],
-    ["Moved to Backlog", "done", "done"],
-    ["Declined", "done", "done"],
-    ["Q2", "indeterminate", "waiting"],
-    ["Pending", "indeterminate", "waiting"],
-    ["Waiting on Customer", "indeterminate", "waiting"],
-    ["To Do", "new", "active"],
-    ["Acknowledged", "new", "active"],
+    ["Done", "done", "closed"],
+    ["Moved to Backlog", "done", "closed"],
+    ["Declined", "done", "closed"],
+    ["Waiting on Customer", "indeterminate", "signoff"],
+    ["Q2", "indeterminate", "escalated"],
+    ["Pending", "indeterminate", "onhold"],
     ["In Progress", "indeterminate", "active"],
+    ["Acknowledged", "new", "triage"],
+    ["To Do", "new", "queued"],
   ];
   for (const [status, statusCategory, expected] of cases) {
-    assert.equal(ticketState({ status, statusCategory }), expected, `${status} -> ${expected}`);
+    assert.equal(outcome({ status, statusCategory }), expected, `${status} -> ${expected}`);
   }
 });
 
-test("a status added in Jira later still lands sensibly", () => {
-  for (const status of ["Waiting on Vendor", "Pending Review", "With Q2 Support", "On Hold", "Blocked"]) {
-    assert.equal(ticketState({ status, statusCategory: "indeterminate" }), "waiting", status);
-  }
+test("Q2 is an outcome of its own, not a delivery", () => {
+  // Reaching Q2 means we could not fix it and escalated to the product help
+  // desk. Counting that as delivered would flatter exactly the case worth
+  // seeing.
+  const escalated = { status: "Q2", statusCategory: "indeterminate" };
+  assert.equal(isEscalated(escalated), true);
+  assert.equal(isDelivered(escalated), false);
+  assert.equal(isWithUs(escalated), false, "it is not our queue either — it is with Q2");
+
+  // Waiting on Customer is delivered: the work is done, the client is signing off.
+  const signoff = { status: "Waiting on Customer", statusCategory: "indeterminate" };
+  assert.equal(isDelivered(signoff), true);
+
+  // Pending has work remaining, so it is still ours and not delivered.
+  const onhold = { status: "Pending", statusCategory: "indeterminate" };
+  assert.equal(isDelivered(onhold), false);
+  assert.equal(isWithUs(onhold), true);
 });
 
-test("waiting means delivered, not open", () => {
-  const parked = { status: "Q2", statusCategory: "indeterminate" };
-  assert.equal(isWithUs(parked), false, "a ticket sitting with Q2 is not our backlog");
-  assert.equal(isWaiting(parked), true);
-  assert.equal(isDelivered(parked), true, "our part is finished");
-
-  const ours = { status: "In Progress", statusCategory: "indeterminate" };
-  assert.equal(isWithUs(ours), true);
-  assert.equal(isDelivered(ours), false);
+test("work time is time In Progress, summed across visits", () => {
+  // Tickets bounce: In Progress -> Pending -> In Progress. Measuring the gap
+  // between two dates would count the hold as work.
+  const issue = {
+    status: "Done",
+    statusCategory: "done",
+    history: { statusMs: { "To Do": 3600000, Acknowledged: 7200000, "In Progress": 5400000, Pending: 86400000 }, reopens: 0 },
+  };
+  assert.equal(workMs(issue), 5400000, "only In Progress counts");
+  assert.equal(triageMs(issue), 7200000, "Acknowledged is queue time, measured separately");
+  assert.equal(stoppedMs(issue), 86400000, "Pending is stopped, not work");
 });
 
-test("a still-running SLA clock never feeds a median or a breach rate", () => {
-  // The live project has tickets parked in Q2 for over a year whose clock keeps
-  // climbing. Counting those would make whoever handled them look slower every
-  // day nobody touches the ticket.
-  const issues = [
-    { key: "A", status: "Done", statusCategory: "done", ckUser: { name: "X" }, topic: "t", loans: [],
-      created: "2026-01-01T00:00:00Z", resolved: "2026-01-02T00:00:00Z",
-      sla: { resolution: { elapsedMs: 3600000, breached: false }, firstResponse: {} } },
-    { key: "B", status: "Q2", statusCategory: "indeterminate", ckUser: { name: "X" }, topic: "t", loans: [],
-      created: "2025-01-01T00:00:00Z",
-      sla: { resolution: { elapsedMs: 9_000_000_000, breached: true, ongoing: true }, firstResponse: {} } },
-  ];
-  assert.equal(hasSettledSla(issues[0]), true);
-  assert.equal(hasSettledSla(issues[1]), false);
-
-  const row = throughputBy(issues, ckUserName)[0];
-  assert.equal(row.delivered, 2, "both count as delivered");
-  assert.equal(row.closed, 1);
-  assert.equal(row.waiting, 1);
-  assert.equal(row.withUs, 0);
-  assert.equal(row.medianSlaMs, 3600000, "the running clock leaked into the median");
-  assert.equal(row.measuredOn, 1);
-  assert.equal(row.breached, 0, "a breach on a running clock was counted as ours");
-  assert.equal(row.breachingNow, 1, "…and it should be reported separately instead");
-  assert.equal(row.breachRate, 0);
-});
-
-test("the headline splits our backlog from what is parked elsewhere", () => {
+test("the headline separates our queue, sign-off and escalation", () => {
   const stats = summarise([
-    { status: "Done", statusCategory: "done", created: "2026-01-01T00:00:00Z", resolved: "2026-01-02T00:00:00Z", loans: [], sla: { resolution: { elapsedMs: 100 }, firstResponse: {} } },
-    { status: "Q2", statusCategory: "indeterminate", created: "2025-01-01T00:00:00Z", loans: [], sla: { resolution: { elapsedMs: 999, breached: true, ongoing: true }, firstResponse: {} } },
-    { status: "To Do", statusCategory: "new", created: "2026-02-01T00:00:00Z", loans: [], sla: { resolution: { elapsedMs: 50, ongoing: true }, firstResponse: {} } },
+    { status: "Done", statusCategory: "done", created: "2026-01-01T00:00:00Z", resolved: "2026-01-02T00:00:00Z", loans: [], sla: { resolution: { elapsedMs: 100 }, firstResponse: {} }, history: { statusMs: { "In Progress": 3600000 }, reopens: 0 } },
+    { status: "Q2", statusCategory: "indeterminate", created: "2025-01-01T00:00:00Z", loans: [], sla: { resolution: { elapsedMs: 999, breached: true, ongoing: true }, firstResponse: {} }, history: { statusMs: { "In Progress": 60000 }, reopens: 0 } },
+    { status: "In Progress", statusCategory: "indeterminate", created: "2026-02-01T00:00:00Z", loans: [], sla: { resolution: { elapsedMs: 50, ongoing: true }, firstResponse: {} }, history: { statusMs: { "In Progress": 120000 }, reopens: 1 } },
   ]);
   assert.equal(stats.closed, 1);
-  assert.equal(stats.waiting, 1);
+  assert.equal(stats.escalated, 1);
   assert.equal(stats.withUs, 1);
-  assert.equal(stats.delivered, 2);
-  assert.equal(stats.measuredOn, 1, "only the settled ticket is measurable");
-  assert.equal(stats.breached, 0);
-  assert.equal(stats.breachingNow, 1);
-  // "Oldest outstanding" must mean oldest thing we owe, not oldest parked item.
-  assert.equal(stats.oldestWithUs, "2026-02-01T00:00:00Z");
+  assert.equal(stats.delivered, 1, "only the closed one — Q2 is not delivered");
+  assert.equal(stats.wip, 1);
+  assert.equal(stats.reopened, 1);
+  // Only delivered tickets contribute a work figure: the others are still running.
+  assert.equal(stats.workMeasuredOn, 1);
+  assert.equal(stats.medianWorkMs, 3600000);
+});
+
+test("a Folk2Folk person in the CK User field is not counted as a CK user", () => {
+  // Danny Learmont (daniellearmont@folk2folk.com) sits in CK User on one
+  // ticket and was skewing the throughput table: one ticket, a 1492h median
+  // and a 100% breach rate against a team of seven. Matched on domain so the
+  // rule does not need a name list.
+  assert.equal(ckUserName({ ckUser: { name: "Danny Learmont", email: "daniellearmont@folk2folk.com" } }), UNASSIGNED);
+  assert.equal(ckUserName({ ckUser: { name: "Md Sameer", email: "md.sameer@cloudkaptan.com" } }), "Md Sameer");
+  // Older CK accounts have no email recorded, so a blank address stays in.
+  assert.equal(ckUserName({ ckUser: { name: "Bhaskar Ray", email: null } }), "Bhaskar Ray");
+});
+
+test("year-on-year compares like for like, not a full year against a part year", () => {
+  const issues = [
+    // 2025: two before the cutoff, one after.
+    { created: "2025-02-10T00:00:00Z", statusCategory: "done", priority: "High", reporter: { name: "Lynda" } },
+    { created: "2025-05-10T00:00:00Z", statusCategory: "done", priority: "High", reporter: { name: "Lynda" } },
+    { created: "2025-11-10T00:00:00Z", statusCategory: "new", priority: "Low", reporter: { name: "Matt" } },
+    // 2026: one before the cutoff.
+    { created: "2026-03-10T00:00:00Z", statusCategory: "done", priority: "High", reporter: { name: "Lynda" } },
+  ];
+  const data = yearOnYear(issues, { asOf: new Date("2026-06-30T00:00:00Z") });
+  const y2025 = data.years.find((y) => y.year === 2025);
+  const y2026 = data.years.find((y) => y.year === 2026);
+
+  assert.equal(y2025.total, 3, "full year");
+  assert.equal(y2025.ytd, 2, "only the two raised before 30 June count to date");
+  assert.equal(y2026.ytd, 1);
+  assert.equal(y2025.done, 2);
+  assert.equal(y2025.open, 1);
+  assert.equal(y2025.months[1], 1, "February");
+
+  const lynda = data.reporters.find((r) => r.name === "Lynda");
+  assert.equal(lynda.years.get(2025).ytd, 2);
+  assert.equal(lynda.years.get(2026).ytd, 1);
+});
+
+test("the reporter filter narrows the whole comparison", () => {
+  const issues = [
+    { created: "2025-02-10T00:00:00Z", statusCategory: "done", priority: "High", reporter: { name: "Lynda" } },
+    { created: "2025-02-11T00:00:00Z", statusCategory: "done", priority: "High", reporter: { name: "Andy" } },
+  ];
+  const finance = yearOnYear(issues, { asOf: new Date("2025-12-31T00:00:00Z"), reporters: ["Lynda"] });
+  assert.equal(finance.years.find((y) => y.year === 2025).total, 1);
+  assert.equal(finance.reporters.length, 1);
+
+  const everyone = yearOnYear(issues, { asOf: new Date("2025-12-31T00:00:00Z") });
+  assert.equal(everyone.years.find((y) => y.year === 2025).total, 2);
+});
+
+test("reporterName falls back rather than dropping the ticket", () => {
+  assert.equal(reporterName({ reporter: { name: "Lynda Statton" } }), "Lynda Statton");
+  assert.equal(reporterName({}), UNASSIGNED);
+});
+
+
+test("who worked a ticket needs both assignee and CK User", () => {
+  // Shared CK login -> the individual comes from CK User.
+  assert.equal(
+    workedBy({ assignee: { name: "FOLK2FOLK CK DESK" }, ckUser: { name: "Md Sameer", email: "md.sameer@cloudkaptan.com" } }),
+    "Md Sameer"
+  );
+  // A named Folk2Folk assignee is the answer on its own.
+  assert.equal(workedBy({ assignee: { name: "Danny Learmont" }, ckUser: null }), "Danny Learmont");
+  // Shared login with nobody named: unrecoverable, and said so rather than
+  // credited to the desk as if it were a person.
+  assert.equal(workedBy({ assignee: { name: "FOLK2FOLK CK DESK" }, ckUser: null }), "CK desk (no CK user set)");
+  assert.equal(workedBy({ assignee: null, ckUser: null }), UNASSIGNED);
+  assert.ok(isSharedDesk({ name: "FOLK2FOLK CK DESK" }));
+  assert.ok(!isSharedDesk({ name: "Andy Marsh" }));
+});
+
+test("comment permalinks point at the comment, not just the ticket", () => {
+  assert.equal(
+    commentUrl("https://team-1595514635049.atlassian.net", "OPS-834", "40672"),
+    "https://team-1595514635049.atlassian.net/browse/OPS-834?focusedCommentId=40672"
+  );
+  assert.equal(commentUrl(null, "OPS-834", "40672"), null);
+  assert.equal(commentUrl("https://x", "OPS-834", null), null);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

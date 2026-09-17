@@ -363,10 +363,26 @@ td.loans { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
 
 /* ── insights ────────────────────────────────────────────────────────── */
 
-/* align-items:start matters: without it every panel in a row stretches to the
-   tallest one, and a 12-row ranking list leaves a short bar chart sitting in
-   half a screen of empty card. */
-.chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; align-items: start; }
+/* A regular grid, not a ragged one.
+   Panels stretch to their row's height and each one puts its chart in the space
+   left over, so the cards line up instead of ending wherever their content
+   happens to stop. Any chart that needs more room opens full-screen on click,
+   which is what makes a uniform (and therefore smaller) tile acceptable. */
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 16px;
+  align-items: stretch;
+}
+.chart-grid > .chart-panel { display: flex; flex-direction: column; }
+.chart-grid > .chart-panel > .chart-box,
+.chart-grid > .chart-panel > .rank-list,
+.chart-grid > .chart-panel > .table-scroll,
+.chart-grid > .chart-panel > #heatmap,
+.chart-grid > .chart-panel > #recurrence { flex: 1; min-height: 240px; }
+/* The sub-heading is fixed-height so titles and charts align across a row even
+   when one description wraps onto a second line. */
+.chart-panel .sub { min-height: 32px; }
 .chart-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
 .chart-panel h3 { font-size: 13.5px; margin: 0 0 2px; }
 .chart-panel .sub { font-size: 12px; color: var(--text-muted); margin-bottom: 12px; }
@@ -669,3 +685,138 @@ tbody tr.is-me-row td:first-child { padding-left: 15px; }
 .has-tip { text-decoration: underline dotted var(--border-strong); text-underline-offset: 3px; cursor: help; }
 .has-tip:hover { text-decoration-color: var(--accent); color: var(--text); }
 thead th.has-tip:hover { color: var(--accent-text); }
+
+/* ── year-on-year report ─────────────────────────────────────────────── */
+
+.report-body { padding: 18px 22px 30px; }
+.report-body h2 { font-size: 19px; margin: 0 0 2px; }
+.report-body h3 { font-size: 14px; margin: 26px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.report-body .lede { color: var(--text-muted); font-size: 13px; margin-bottom: 14px; }
+.report-body .scope { background: var(--surface-2); border-left: 3px solid var(--accent); border-radius: var(--radius-sm); padding: 10px 13px; font-size: 12.5px; margin-bottom: 18px; }
+.report-body .scope div { margin: 2px 0; }
+.report-body .scope b { color: var(--text-muted); font-weight: 600; }
+.report-body table { margin-bottom: 4px; }
+.report-body td, .report-body th { padding: 7px 10px; }
+.report-body td.num, .report-body th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.report-body tr.total-row td { font-weight: 600; border-top: 2px solid var(--border-strong); }
+.report-body ul { font-size: 13px; padding-left: 18px; margin: 0; }
+.report-body ul li { margin-bottom: 6px; }
+
+.delta { padding: 1px 6px; border-radius: 4px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.delta.up { background: var(--urgent-soft); color: var(--urgent); }
+.delta.down { background: var(--done-soft); color: var(--done); }
+.delta.flat { color: var(--text-faint); }
+
+/* Save as PDF is the browser's own print-to-PDF, so the page has to become the
+   report: everything else is chrome and is dropped. */
+@media print {
+  .masthead, .kpis, .tabs, .no-print, .scrim, .drawer, .chart-modal { display: none !important; }
+  .view:not(#view-report) { display: none !important; }
+  main { max-width: none; padding: 0; }
+  .panel { border: 0; box-shadow: none; }
+  body { background: #fff; }
+  .report-body { padding: 0; }
+  .report-body h3 { break-after: avoid; }
+  /* The charts are part of the report, so they print. One per row at a size
+     that stays legible on paper, and never split across a page. */
+  #report-charts { display: block !important; }
+  #report-charts .chart-panel { break-inside: avoid; border: 0; padding: 0; margin: 0 0 18px; }
+  #report-charts .chart-box { height: 230px; }
+  .report-body ul { break-inside: avoid; }
+  table { break-inside: auto; }
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+}
+
+/* ── queues ──────────────────────────────────────────────────────────── */
+
+.queue-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; align-items: start; }
+.queue .panel-head { gap: 8px; }
+.queue .panel-head h2 { text-transform: none; font-size: 14px; letter-spacing: 0; color: var(--text); }
+.queue-count { margin-left: auto; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.queue.tone-urgent .queue-count { color: var(--urgent); }
+.queue.tone-progress .queue-count { color: var(--progress); }
+.queue.tone-todo .queue-count { color: var(--todo); }
+.queue.tone-done .queue-count { color: var(--done); }
+.queue-blurb { padding: 8px 14px 10px; font-size: 12.5px; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+.queue-list { max-height: 420px; overflow-y: auto; }
+.queue-row { display: block; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); padding: 9px 14px; }
+.queue-row:hover { background: var(--surface-hover); }
+.queue-row .top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.queue-summary { font-size: 13px; margin-top: 3px; }
+.queue-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; padding: 0 14px 10px; }
+.queue-row .queue-meta { padding: 0; margin-top: 4px; }
+
+/* ── status lifeline ─────────────────────────────────────────────────── */
+
+.lifeline { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--surface-hover); }
+.lifeline-seg { min-width: 2px; }
+.lifeline-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 11.5px; color: var(--text-muted); }
+.lifeline-key { display: inline-flex; align-items: center; gap: 5px; }
+.lifeline-key .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.hint { font-size: 12px; color: var(--text-faint); margin-top: 8px; }
+.section > h3 .chip { margin-left: 6px; }
+
+/* ── heatmap ─────────────────────────────────────────────────────────── */
+
+table.heatmap { font-size: 12.5px; }
+table.heatmap th { font-size: 11px; }
+table.heatmap td { border-bottom: 1px solid var(--border); }
+table.heatmap td.heat { text-align: center; font-variant-numeric: tabular-nums; border-radius: 3px; }
+table.heatmap td:first-child { white-space: nowrap; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+#reporter-quality td { white-space: nowrap; }
+#reporter-quality tbody tr:hover { background: var(--surface-hover); }
+
+/* Model-written, and marked as such — everything else in the panel is a
+   person's words or a quoted comment. */
+.advice .summary-box { border-left-color: var(--accent); white-space: pre-wrap; }
+.advice .icon-button { margin-top: 8px; }
+
+/* A KPI that opens the tickets behind it. */
+.kpi-link { cursor: pointer; text-align: left; font: inherit; color: inherit; }
+.kpi-link:hover { border-color: var(--accent); background: var(--surface-hover); }
+.kpi-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.chart-box.zoomable-box { cursor: zoom-in; }
+.icon-button.close-x { font-size: 15px; line-height: 1; padding: 5px 10px; }
+#heatmap table { min-width: 100%; }
+
+/* A grid that is wide enough for a table rather than a bar chart. Falls back to
+   a single column when there is not room for two. */
+.chart-panel.wide { grid-column: span 2; }
+@media (max-width: 900px) { .chart-panel.wide { grid-column: span 1; } }
+
+/* A count on a tab that holds work waiting to be done. */
+.tab-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-hover);
+  color: var(--text-muted);
+}
+.tab-badge.urgent { background: var(--urgent-soft); color: var(--urgent); }
+.tab[aria-selected="true"] .tab-badge { background: var(--accent-soft); color: var(--accent-text); }
+
+/* Shown while the index is being built server-side — a slow, explained wait
+   rather than a blank page. */
+.loading-banner {
+  max-width: 1600px;
+  margin: 16px auto 0;
+  padding: 11px 16px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border-radius: var(--radius);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.loading-banner[hidden] { display: none; }
+/* The stale content stays visible but is clearly not current, and is not
+   clickable while it is being replaced. */
+body.is-loading main,
+body.is-loading .kpis { opacity: .45; pointer-events: none; transition: opacity .15s; }

@@ -48,6 +48,38 @@ own Components for comparison.
 
 **Only mine.** One toggle narrows every number on every tab to your tickets.
 
+**Year on year.** Tickets *raised* this year against last, with a like-for-like
+year-to-date cut so a full year is never compared against a part year. Filter to
+any set of reporters — the finance team, or anyone — and **Save as PDF** prints
+it through the browser. Sections: key metrics, monthly trend, reporter
+breakdown, priority mix, and what this year's tickets were about.
+
+**Queues.** Six working lists of *open* tickets only, with a count on the tab so
+you can see there is work without opening it rather than another slice of history: what needs
+picking up, work that has gone stale, escalations sitting with Q2, tickets that
+came back after being closed, work awaiting client sign-off, and tickets on the
+shared login with nobody named.
+
+**Reopens.** Read from the status history and invisible in a ticket's current
+fields — 63 of them here. The cheapest quality signal in the project.
+
+**Ask Claude what to check** *(optional, off by default)*. On a ticket, sends it
+and its nearest earlier tickets to Claude and asks what to look at first.
+Requires `ANTHROPIC_API_KEY`; without one the button does not appear and nothing
+is ever sent. Output is labelled as model-written — everything else in the panel
+is a person's words or a quoted comment, and that distinction is the point.
+
+**Who raised what.** The demand side: which part of the business generates the
+load, what kind of problem each reporter brings, and how long their tickets take
+before anyone can act.
+
+**Did the fix hold?** Loans that came back after a ticket against them was
+closed — 23% within 90 days here, 9% with the same topic. The strongest evidence
+a root cause is still in place.
+
+**Keyboard.** `/` jumps to the search box on whichever tab is open; `Esc` clears
+it, closes an enlarged chart, or closes the ticket panel, innermost first.
+
 **Hover anything abbreviated.** SLA, p90, work time, "with us", "delivered" —
 every term with a dotted underline carries its full form on hover, defined once
 so the wording cannot drift between a card, a table header and a ticket panel.
@@ -62,7 +94,25 @@ fresh load — every filter cleared, nothing selected, back on Loans. It does no
 re-fetch: the data is already right, and going home should be instant. Refresh
 is the control for new data.
 
-## Only production issues
+## Three scopes, one dashboard
+
+The queue serves two different jobs, so the scope selector in the header picks
+which one you are looking at:
+
+| Scope | Tickets | For |
+|---|---|---|
+| **Production issues** (default) | 604 | The developers — faults only |
+| **Feature requests** | 86 | The Product Owner / Scrum Master backlog |
+| **Everything** | 879 | The whole queue |
+
+These are mutually exclusive. An earlier version had a "+ Feature requests"
+toggle that *added* them to the production set, which read as "show me the
+backlog" and delivered "show me both" — a control that looked like it had done
+nothing. Switching scope rebuilds the index from Jira and takes about fifteen
+seconds, so it shows an explicit loading banner rather than leaving the previous
+scope's numbers on screen looking current.
+
+## What "production issues" excludes
 
 Two fields decide what counts, and the dashboard applies both everywhere — KPIs,
 loan timelines, throughput and every chart:
@@ -261,7 +311,7 @@ both routes behave identically.
 | `does not exist, or the account cannot see it` on a ticket | Correct credentials, but that issue key is not visible to this account. |
 | `port 8888 is in use — trying 8889` | Not an error. Another server is already on 8888, so this one moved up. Open the port it prints. |
 | `Ports 8888–8897 are all in use` | Ten consecutive ports are occupied, which usually means a pile of servers left running. `pkill -f dev-server.js`, or pick a free one with `PORT=9000 npm run dev`. |
-| Empty dashboard, no error | The project has no tickets matching the filters — everything was excluded as a feature or service request. See [Only production issues](#only-production-issues). |
+| Empty dashboard, no error | The project has no tickets matching the filters — everything was excluded as a feature or service request. See [Only production issues](#what-production-issues-excludes). |
 | A read-only token, and saving a summary fails | Expected: writing a note posts a Jira comment. Use an account that can comment. |
 
 ## Deploying
@@ -326,38 +376,83 @@ group, and hiding it would flatter everyone's individual numbers.
 Set `CK_ME_EMAIL` to the email on your Jira account — the same one the CK User
 field holds.
 
-## What "open" means
+## The workflow, and what "open" means
 
-Jira's status categories only know *new / in progress / done*, which lumps
-together two situations that mean opposite things for this desk:
+Jira's status categories collapse everything into new / in progress / done. The
+desk's actual workflow has seven meanings:
 
-| | Statuses | What it means |
+| Status | Means | Counts as |
 |---|---|---|
-| **Still with us** | To Do, Acknowledged, In Progress | We owe work. This is the real backlog. |
-| **Waiting on others** | Q2, Pending, Waiting on Customer | Our work is finished. The ticket is parked with Q2 support or with the client. |
-| **Closed** | Done, Declined, Moved to Backlog | Resolved in Jira. |
+| To Do | Raised, nobody has picked it up | Our queue |
+| Acknowledged | Read and analysed; work not started | Our queue |
+| In Progress | The actual work | **The only status that counts as work time** |
+| Pending | Work remaining, parked for now | Our queue — not delivered |
+| Waiting on Customer | Our work is done, awaiting client sign-off | **Delivered** |
+| Q2 | Escalated to the product help desk | **Its own outcome** — not delivered |
+| Done / Declined / Moved to Backlog | Closed | Delivered |
 
-Counting "waiting" as open badly misreports the desk. On the live project, of
-the 38 outstanding production issues **26 are waiting on somebody else and only
-12 are genuinely ours** — and 24 of those 26 are breaching SLA purely because
-the clock keeps running while we wait.
+Two of these earn their own treatment:
 
-So the dashboard splits them. "Still with us" is the backlog figure, "Waiting on
-others" sits beside it, and the throughput table counts a parked ticket as
-**delivered** by whoever handled it, alongside a separate column for how many of
-their tickets are parked. A status added in Jira later ("Waiting on Vendor",
-"On Hold") is recognised without a code change.
+**Q2 is not a delivery.** Reaching Q2 means we could not fix it. Counting it as
+delivered would flatter exactly the case worth seeing — and on the live project
+those 24 tickets have been open up to **751 days**.
 
-### Settled clocks only
+**Pending is still ours.** There is work remaining on it, so it stays in the
+queue rather than joining the delivered pile.
 
-Every median, percentile and breach rate is computed over tickets whose **SLA
-clock has stopped**. A ticket sitting in Q2 for a year has a number that is
-still climbing; folding it in would make whoever handled it look slower every
-day nobody touches the ticket.
+## Time actually spent
 
-Tickets past target on a still-running clock are not silently dropped either —
-they are reported separately as *breaching now*, because that is a live problem,
-just not a finished measurement.
+Work time is **elapsed time in In Progress, summed across every visit**. Tickets
+bounce — In Progress → Pending → In Progress → Waiting on Customer — so the gap
+between two dates is not the work; each visit has to be added up. That comes
+from the status history, which rides along with the same Jira request the index
+already makes, so it costs no extra round trips.
+
+Acknowledged is measured separately as **queue wait**: read and accepted, but
+not yet started.
+
+### Two caveats worth knowing before quoting a number
+
+**In Progress is often flipped late.** Across delivered tickets the median time
+in In Progress is **8 minutes**, while the median in Acknowledged is **56
+minutes** — and 48% of tickets spend longer in Acknowledged than In Progress.
+OPS-847 sat 18 days in Acknowledged and under a minute In Progress. That is a
+workflow-hygiene signal, not a measurement of eight-minute fixes. The ticket
+panel draws the full status breakdown for exactly this reason: a single number
+is only as good as when the status was set.
+
+**These are elapsed hours, not working hours.** A ticket left In Progress over a
+weekend counts the weekend. Jira's SLA clock applies the desk's working calendar
+but to the wrong scope — it keeps running through Pending, Waiting and Q2 alike
+— so neither figure is both right. Both are shown, labelled. Intersecting the In
+Progress intervals with a working calendar is the upgrade if it matters.
+
+### Credit for the work
+
+A ticket handed over mid-flight credits each person with the stretches they
+personally held — replayed from the CK User and assignee history against the
+In Progress intervals. Without that, whoever closes a ticket inherits every hour
+spent on it and whoever did the first half gets none. 42 tickets here changed
+hands while being worked. The **Helped on** column counts tickets a person
+worked but somebody else finished; **Delivered** is always credited to whoever
+closed it.
+
+### Who worked it
+
+Atlassian seats are expensive, so the CK team shares one login — FOLK2FOLK CK
+DESK — and records the individual in the **CK User** field. Folk2Folk's own
+staff are assigned normally and have no CK User:
+
+| | Tickets | With a CK User |
+|---|---|---|
+| assignee = shared desk | 313 | 288 (92%) |
+| assignee = named person | 237 | 10 (4%) |
+
+So neither field alone answers "who worked this". The default grouping is the
+**assignee, unless it is the shared desk, in which case the CK User** — which
+turns a 304-ticket "not set" bucket into named people. Credit goes to whoever
+holds the ticket at the end, which is who finished it. Assignee, CK User and
+reporter are all still available as separate groupings.
 
 ## Two different clocks
 
@@ -529,6 +624,36 @@ heuristics are tuned to how this team actually writes, so the tests have to be
 too. The ones carrying the most weight assert that a sign-off is never mistaken
 for a fix, and that a ticket parked with Q2 is never counted as our backlog.
 
+## The year-on-year report
+
+Answers "are we generating fewer problems than last year", so it counts tickets
+**raised** in a period rather than resolved.
+
+Two things it is careful about, because both are easy ways to report a change
+that did not happen:
+
+- **Like-for-like.** Each year carries a full-year total *and* a year-to-date
+  count cut at the same month and day as today. The headline percentage always
+  compares YTD against YTD. The monthly table's total row deliberately shows no
+  variance, because subtracting a part year from a full one is exactly the
+  number this avoids.
+- **The month in progress** is labelled *(to 17 Sep)* and months that have not
+  happened yet show `—` rather than `0`.
+
+Priority shifts are shown uncoloured on purpose: more *Highest* is bad, more
+*Low* is fine, so one colour rule would be wrong half the time.
+
+**Save as PDF** is the browser's own print-to-PDF — no dependency, and it
+already knows how to paginate. A print stylesheet drops the header, tabs and
+every other view so only the report prints.
+
+### Reporter names
+
+Jira holds whatever the account has, so a couple differ from how people refer to
+them — `GillAlford@folk2folk.com` has no display name set, and `Siobhan Parson`
+has no trailing "s". Reporters are listed exactly as Jira has them rather than
+being mapped to tidier names, so the list can be reconciled against Jira.
+
 ## Caching, and not hammering Jira
 
 Building the index means paging the whole project out of Jira — roughly ten
@@ -560,6 +685,9 @@ unchanged*.
 - **A 5-minute cache** sits in front of Jira. **Refresh** bypasses it.
 - **Around 850 tickets** is fetched in one pass. Far beyond that, the index
   endpoint would want a real store behind it rather than a warm-memory cache.
+- **CK User occasionally holds a Folk2Folk person** rather than a CloudKaptan
+  one. Those are excluded from the CK-user axis by email domain, so they land on
+  the assignee axis where they belong.
 - **CK User is only set on 40% of tickets**, so the "— not set —" row is the
   biggest one in the throughput table. That is a data-entry gap, not a bug, and
   it is shown rather than hidden.
