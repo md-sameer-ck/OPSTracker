@@ -13,10 +13,10 @@ import { FIX_NOTE_MARKER, ISSUE_NOTE_MARKER } from "./lib/digest.js";
 import {
   assigneeName, calendarMs, ckUserName, firstResponseMs, formatDuration, formatWorkTime,
   hasSettledSla, isDelivered, isResolved, isWaiting, isWithUs, median, slaBreached,
-  slaElapsedMs, summarise, throughputBy, ticketState, toHours, UNASSIGNED,
+  slaElapsedMs, summarise, throughputBy, ticketState, toHours, UNASSIGNED, isOpen,
   reporterName, yearOnYear, workedBy, isSharedDesk, commentUrl,
   outcome, OUTCOME_LABEL, isEscalated, isInProgress, workMs, triageMs, stoppedMs,
-  firstTouchMs, reopenCount, WORK_STATUS, TRIAGE_STATUS, workByOwnerMs, loanRecurrence,
+  firstTouchMs, reopenCount, WORK_STATUS, TRIAGE_STATUS, workByOwnerMs, loanRecurrence, isLive, isTerminal,
 } from "./lib/stats.js";
 
 const API = "/api";
@@ -31,7 +31,6 @@ const state = {
   peopleSort: { column: "delivered", direction: -1 },
   raisedSort: { column: "total", direction: -1 },
   reportAllYears: false,
-  onlyMine: false,
   scope: "production",
   charts: {},
   chartConfigs: {},
@@ -78,6 +77,10 @@ const GLOSSARY = {
     "Reopened — the ticket left a closed status and went back into the workflow. Read from the status history; invisible in the ticket's current fields.",
   contributed:
     "Helped on — tickets this person worked on but somebody else finished. Their own hours still count toward their work time; the ticket counts as delivered by whoever closed it.",
+  live:
+    "Still live — something will still happen: To Do, Acknowledged, In Progress, Pending, or Waiting on Customer. Excludes Q2, which is terminal here: an escalated ticket stays in that status and a fresh ticket is raised if the problem recurs.",
+  reporter:
+    "Reporter — who raised the ticket. Folk2Folk staff raise these through the customer portal.",
   firstTouch:
     "First touch — how long the ticket sat after being raised before anyone moved it out of To Do.",
   calendarAge:
@@ -90,6 +93,8 @@ const GLOSSARY = {
     "SLA breached — the resolution clock passed its target before the ticket was settled. Counted only over tickets whose clock has stopped, so a figure cannot creep up on its own.",
   breachingNow:
     "Breaching now — past target on a clock that is still running. Shown separately from the breach rate because it is not a finished measurement yet.",
+  user:
+    "User — who holds the ticket: the Jira assignee, or, when the assignee is the shared FOLK2FOLK CK DESK login, the CK User named on it. Falls back to the desk account itself when no CK User was set.",
   ckUser:
     "CK User — the Jira field naming which of the CloudKaptan team picked the ticket up. The Jira login for this desk is a single shared account, so the assignee does not tell you this.",
   assignee: "Assignee — the Jira assignee, usually the Folk2Folk-side owner of the ticket rather than the person who did the work.",
@@ -135,7 +140,6 @@ function relative(value) {
   return `${years} years ago`;
 }
 
-const isOpen = (issue) => issue.statusCategory !== "done";
 
 /** Calendar days a ticket took, or has been open so far. */
 function ageDays(issue) {
@@ -243,17 +247,6 @@ function applyIndex(data, { fromCache = false, ageMs = 0 } = {}) {
     : `updated ${fmtDateTime(data.fetchedAt)}`;
   $("freshness").textContent = stamp;
   $("freshness").classList.toggle("stale", Boolean(data.stale));
-
-  // "Only mine" is only meaningful once we know who "mine" is.
-  const mineToggle = $("mine-toggle");
-  if (data.me) {
-    mineToggle.hidden = false;
-    mineToggle.textContent = `Only mine`;
-    mineToggle.title = `Show only tickets where CK User is ${data.me}`;
-  } else {
-    mineToggle.hidden = true;
-    state.onlyMine = false;
-  }
 
   renderAll();
 }
@@ -437,9 +430,6 @@ function renderKpis() {
   const stats = summarise(issues);
   const repeatLoans = [...state.loans.values()].filter((l) => l.issues.length >= 3);
   const withLoan = issues.filter((i) => (i.loans || []).length).length;
-  const mine = state.meta?.me
-    ? issues.filter((i) => i.ckUser?.email && i.ckUser.email === state.meta.me)
-    : [];
 
   const kpis = [
     { value: stats.total, label: "Production issues", filter: {}, note: `${withLoan} name a loan (${pct(withLoan, stats.total)})` },
@@ -492,17 +482,6 @@ function renderKpis() {
     { value: state.loans.size, label: "Loans affected", note: `${repeatLoans.length} with 3 or more tickets` },
   ];
 
-  if (state.meta?.me) {
-    const myStats = summarise(mine);
-    kpis.push({
-      value: `${myStats.delivered}/${myStats.total}`,
-      label: "Mine, delivered / total",
-      term: "delivered",
-      note: myStats.measuredOn ? `median ${formatWorkTime(myStats.medianSlaMs)}` : "nothing settled yet",
-      small: true,
-    });
-  }
-
   const container = $("kpis");
   container.innerHTML = "";
   for (const kpi of kpis) {
@@ -525,18 +504,9 @@ function renderKpis() {
 
 const pct = (part, whole) => (whole ? `${Math.round((part / whole) * 100)}%` : "—");
 
-/**
- * The ticket set every view works from. "Only mine" is a global lens rather than
- * a filter on one table, so turning it on narrows the KPIs, the loan list, the
- * charts and the throughput table together — otherwise the headline numbers
- * would describe a different population than the list underneath them.
- */
 function visibleIssues() {
-  if (!state.onlyMine || !state.meta?.me) return state.issues;
-  return state.issues.filter((issue) => issue.ckUser?.email === state.meta.me);
+  return state.issues;
 }
-
-// ── loans view ────────────────────────────────────────────────────────
 
 function sortedLoans() {
   const mode = $("loan-sort").value;
@@ -635,12 +605,20 @@ function renderLoanDetail() {
     ? tip(el("span", "chip status-waiting", `${loan.waiting} waiting on others`), "waiting")
     : el("span", "chip status-done", "all resolved");
   title.append(stateChip);
-  const jiraLink = el("a", "icon-button", "Open in Jira ↗");
+  const actions = el("div", "loan-actions");
+  actions.style.marginLeft = "auto";
+  if (state.adviceAvailable) {
+    const summarise = el("button", "icon-button", "\u2726 Summarise with Claude");
+    summarise.title = `Read every ticket for ${loan.key} and summarise what keeps happening`;
+    summarise.onclick = () => showLoanSummary(loan);
+    actions.append(summarise);
+  }
+  const jiraLink = el("a", "icon-button", "Open in Jira \u2197");
   jiraLink.href = jiraSearchUrl(loan.key);
   jiraLink.target = "_blank";
   jiraLink.rel = "noopener";
-  jiraLink.style.marginLeft = "auto";
-  title.append(jiraLink);
+  actions.append(jiraLink);
+  title.append(actions);
   header.append(title);
 
   const stats = el("div", "stats");
@@ -679,6 +657,65 @@ function statusChip(issue) {
   if (state === "waiting") tip(chip, "waiting");
   else if (state === "active") tip(chip, "withUs");
   return chip;
+}
+
+/** Everything known about a loan, handed to Claude in one go. */
+function loanSummaryPrompt(loan) {
+  const lines = [
+    `Loan ${loan.key} has ${loan.issues.length} operational tickets raised against it on a peer-to-peer lending platform running on Salesforce.`,
+    "",
+    "The tickets, oldest first:",
+  ];
+  for (const issue of loan.issues) {
+    const detail = state.detailCache.get(issue.key);
+    lines.push(
+      `- ${issue.key} (${fmtDate(issue.created)}, ${issue.status}, ${issue.topicLabel}): ${issue.summary}`,
+      `  reported: ${truncate(issue.preview || "", 400) || "(no description)"}`
+    );
+    const fix = detail?.digest?.fix?.text;
+    if (fix) lines.push(`  recorded fix: ${truncate(fix, 400)}`);
+  }
+  lines.push(
+    "",
+    "Write a brief for whoever picks up the next ticket on this loan. Four short sections, plain prose, no preamble:",
+    "**What keeps happening** — the pattern across these tickets, not a list of them.",
+    "**Root cause, as far as it can be told** — what the evidence points to. Say plainly if it does not point anywhere.",
+    "**What has actually fixed it before** — only fixes recorded above, naming the ticket.",
+    "**What to try next** — concrete checks for a recurrence, most likely first.",
+    "Be specific and short. Do not invent record ids, fields or fixes that are not above."
+  );
+  return lines.join("\n");
+}
+
+function showLoanSummary(loan) {
+  const modal = $("chart-modal");
+  modal.innerHTML = "";
+  const head = el("div", "chart-modal-head");
+  const titles = el("div");
+  titles.append(el("h2", null, `${loan.key} — what keeps happening`));
+  titles.append(el("div", "sub", `${loan.issues.length} tickets, oldest ${fmtDate(loan.first)}, newest ${fmtDate(loan.last)}.`));
+  head.append(titles);
+  const close = el("button", "icon-button close-x", "✕");
+  close.title = "Close (Esc)";
+  close.setAttribute("aria-label", "Close");
+  close.style.marginLeft = "auto";
+  close.onclick = closeChartZoom;
+  head.append(close);
+  modal.append(head);
+
+  const body = el("div", "chart-modal-body");
+  body.append(
+    aiPanel({
+      title: "Summary",
+      hint: `Sends the ${loan.issues.length} tickets for this loan — summaries, descriptions and any recorded fixes — to Claude.`,
+      buttonLabel: "✦ Summarise this loan",
+      cacheKey: `loan:${loan.key}`,
+      buildPrompt: () => loanSummaryPrompt(loan),
+    })
+  );
+  modal.append(body);
+  $("chart-scrim").hidden = false;
+  modal.hidden = false;
 }
 
 function timelineItem(issue) {
@@ -835,17 +872,10 @@ function populateFilters() {
     byVolume((i) => i.priority).map(([name, count]) => [name, `${name} (${count})`])
   );
 
-  fill(
-    "filter-ck",
-    "Any CK user",
-    byVolume(ckUserName).map(([name, count]) => [name, `${name} (${count})`])
-  );
+  fill("filter-user", "Any user", byVolume(workedBy).map(([name, count]) => [name, `${name} (${count})`]));
 
-  fill(
-    "filter-assignee",
-    "Any assignee",
-    byVolume(assigneeName).map(([name, count]) => [name, `${name} (${count})`])
-  );
+  fill("filter-assignee", "Any assignee", byVolume(assigneeName).map(([name, count]) => [name, `${name} (${count})`]));
+  fill("filter-reporter", "Any reporter", byVolume(reporterName).map(([name, count]) => [name, `${name} (${count})`]));
 }
 
 function filteredTickets() {
@@ -854,8 +884,9 @@ function filteredTickets() {
   const topic = $("filter-topic").value;
   const priority = $("filter-priority").value;
   const loanFilter = $("filter-loan").value;
-  const ckFilter = $("filter-ck").value;
+  const userFilter = $("filter-user").value;
   const assigneeFilter = $("filter-assignee").value;
+  const reporterFilter = $("filter-reporter").value;
   const reopenedFilter = $("filter-reopened").value;
 
   return visibleIssues().filter((issue) => {
@@ -867,12 +898,13 @@ function filteredTickets() {
     if (stateFilter === "delivered" && !isDelivered(issue)) return false;
     if (topic && issue.topic !== topic) return false;
     if (priority && issue.priority !== priority) return false;
-    if (ckFilter && ckUserName(issue) !== ckFilter) return false;
+    if (userFilter && workedBy(issue) !== userFilter) return false;
     if (assigneeFilter && assigneeName(issue) !== assigneeFilter) return false;
+    if (reporterFilter && reporterName(issue) !== reporterFilter) return false;
     if (loanFilter === "with" && !(issue.loans || []).length) return false;
     if (loanFilter === "without" && (issue.loans || []).length) return false;
     if (query) {
-      const haystack = `${issue.key} ${issue.summary} ${issue.preview} ${(issue.loans || []).join(" ")} ${(issue.components || []).join(" ")} ${ckUserName(issue)} ${assigneeName(issue)}`.toLowerCase();
+      const haystack = `${issue.key} ${issue.summary} ${issue.preview} ${(issue.loans || []).join(" ")} ${(issue.components || []).join(" ")} ${workedBy(issue)} ${assigneeName(issue)} ${reporterName(issue)}`.toLowerCase();
       if (!haystack.includes(query)) return false;
     }
     return true;
@@ -887,7 +919,8 @@ function renderTickets() {
   const value = (issue) => {
     if (column === "days") return ageDays(issue) ?? -1;
     if (column === "work") return slaElapsedMs(issue) ?? -1;
-    if (column === "ck") return ckUserName(issue).toLowerCase();
+    if (column === "user") return workedBy(issue).toLowerCase();
+    if (column === "reporter") return reporterName(issue).toLowerCase();
     if (column === "created") return new Date(issue.created || 0).getTime();
     if (column === "key") return Number(issue.key.split("-")[1]) || 0;
     return String(issue[column] ?? "").toLowerCase();
@@ -925,17 +958,23 @@ function renderTickets() {
 
     tr.append(cell("loans", (issue.loans || []).join(", ") || "—"));
 
-    const ckCell = document.createElement("td");
-    const ck = issue.ckUser?.name;
-    if (ck) {
-      const chip = el("span", "chip person", ck);
-      if (state.meta?.me && issue.ckUser?.email === state.meta.me) chip.classList.add("is-me");
-      ckCell.append(chip);
+    const reporterCell = document.createElement("td");
+    reporterCell.className = "date";
+    reporterCell.textContent = issue.reporter?.name || "—";
+    tr.append(reporterCell);
+
+    // Who holds the ticket: the assignee, or the CK User behind the shared
+    // desk login, falling back to the desk itself.
+    const userCell = document.createElement("td");
+    const who = workedBy(issue);
+    if (who === UNASSIGNED) {
+      userCell.className = "date";
+      userCell.textContent = "—";
     } else {
-      ckCell.className = "date";
-      ckCell.textContent = "—";
+      const chip = el("span", "chip person", who);
+      userCell.append(chip);
     }
-    tr.append(ckCell);
+    tr.append(userCell);
 
     const statusCell = document.createElement("td");
     statusCell.append(statusChip(issue));
@@ -964,7 +1003,7 @@ function renderTickets() {
   if (rows.length > LIMIT) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 10;
+    td.colSpan = 11;
     td.style.cssText = "text-align:center;color:var(--text-muted);font-size:12.5px";
     td.textContent = `Showing the first ${LIMIT} of ${rows.length}. Narrow the filters to see the rest.`;
     tr.append(td);
@@ -974,7 +1013,7 @@ function renderTickets() {
   if (!rows.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 10;
+    td.colSpan = 11;
     td.className = "empty-state";
     td.textContent = "No ticket matches these filters.";
     tr.append(td);
@@ -1005,7 +1044,7 @@ function peopleWindowFilter() {
   };
 }
 
-const TICKET_FILTER_IDS = ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-ck", "filter-assignee", "filter-reopened"];
+const TICKET_FILTER_IDS = ["filter-state", "filter-topic", "filter-priority", "filter-loan", "filter-user", "filter-assignee", "filter-reporter", "filter-reopened"];
 const AXIS_LABEL = { worked: "person", ck: "CK user", assignee: "assignee", reporter: "reporter" };
 const peopleKeyOf = (axis) =>
   axis === "assignee" ? assigneeName : axis === "reporter" ? reporterName : axis === "ck" ? ckUserName : workedBy;
@@ -1058,14 +1097,9 @@ function renderPeople() {
 
   for (const row of rows) {
     const tr = document.createElement("tr");
-    const isMe = state.meta?.me && row.email === state.meta.me;
     const isUnset = row.key === UNASSIGNED;
-    if (isMe) tr.classList.add("is-me-row");
-
     const personCell = document.createElement("td");
-    const chip = el("span", `chip person${isMe ? " is-me" : ""}${isUnset ? " muted" : ""}`, row.key);
-    personCell.append(chip);
-    if (isMe) personCell.append(el("span", "tag-me", "you"));
+    personCell.append(el("span", `chip person${isUnset ? " muted" : ""}`, row.key));
     tr.append(personCell);
 
     tr.append(numCell(row.delivered, "strong"));
@@ -1111,9 +1145,9 @@ function renderPeople() {
     // the whole person's work.
     tr.onclick = () =>
       showTickets(
-        axis === "ck" ? { ck: row.key }
+        axis === "worked" || axis === "ck" ? { user: row.key }
         : axis === "assignee" ? { assignee: row.key }
-        : { search: row.key }
+        : { reporter: row.key }
       );
     body.append(tr);
   }
@@ -1138,7 +1172,7 @@ function renderPeopleCharts(rows, axis) {
       labels: named.map((r) => r.key),
       datasets: [{
         data: named.map((r) => r.delivered),
-        backgroundColor: named.map((r, i) => (state.meta?.me && r.email === state.meta.me ? "#17875b" : PALETTE[i % PALETTE.length])),
+        backgroundColor: named.map((_, i) => PALETTE[i % PALETTE.length]),
         borderRadius: 3,
       }],
     },
@@ -1165,7 +1199,7 @@ function renderPeopleCharts(rows, axis) {
       labels: timed.map((r) => `${r.key} (n=${r.workMeasuredOn})`),
       datasets: [{
         data: timed.map((r) => toHours(r.medianWorkMs)),
-        backgroundColor: timed.map((r, i) => (state.meta?.me && r.email === state.meta.me ? "#17875b" : PALETTE[(i + 4) % PALETTE.length])),
+        backgroundColor: timed.map((_, i) => PALETTE[(i + 4) % PALETTE.length]),
         borderRadius: 3,
       }],
     },
@@ -1199,7 +1233,7 @@ function renderPeopleCharts(rows, axis) {
       datasets: peopleList.map((name, i) => ({
         label: name,
         data: monthKeys.map((m) => months.get(m).get(name) || 0),
-        backgroundColor: state.meta?.me && rows.find((r) => r.key === name)?.email === state.meta.me ? "#17875b" : PALETTE[i % PALETTE.length],
+        backgroundColor: PALETTE[i % PALETTE.length],
         borderRadius: 2,
       })),
     },
@@ -1609,27 +1643,64 @@ function renderRankList(containerId, rows, emptyMessage) {
 }
 
 /**
- * The optional Claude read of this ticket against its nearest neighbours.
+ * Ask Claude something, by whichever route this host offers.
  *
- * Deliberately: off unless a key is configured, never run without a click, and
- * labelled as model-written wherever it appears — everything else in this panel
- * is either a person's words or a quoted comment, and that has to stay legible.
+ * Published as an Artifact the page asks the platform directly (the viewer is
+ * prompted and pays); served from Netlify it posts to ops-advise, which needs
+ * ANTHROPIC_API_KEY. If neither is available the caller gets null and hides the
+ * affordance rather than offering a button that cannot work.
  */
-function adviceSection(detail) {
-  const section = el("div", "section advice");
-  section.append(el("h3", null, "What should I check?"));
+async function askClaude(prompt, { onText } = {}) {
+  const sample = await window.claude?.use?.("sample");
+  if (sample) {
+    const result = await sample(prompt, { onText, modelTier: "default" });
+    return result.text;
+  }
 
-  const cached = state.adviceCache.get(detail.key);
-  const render = (payload) => {
+  const response = await fetch(`${API}/ops-advise`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Analysis is unavailable.");
+  return payload.text;
+}
+
+/** Whether any route to Claude exists in this host. */
+async function claudeAvailable() {
+  if (await window.claude?.use?.("sample")) return true;
+  try {
+    const response = await fetch(`${API}/ops-advise`);
+    return Boolean((await response.json()).available);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A panel that runs a prompt and streams the answer in, with the result always
+ * labelled as model-written — everything else on these screens is a person's
+ * words or a quoted comment, and that distinction is the reason they can be
+ * trusted.
+ */
+function aiPanel({ title, hint, buttonLabel, cacheKey, buildPrompt }) {
+  const section = el("div", "section advice");
+  section.append(el("h3", null, title));
+
+  const cached = state.adviceCache.get(cacheKey);
+  const render = (text) => {
     section.querySelector(".advice-body")?.remove();
     section.querySelector(".provenance")?.remove();
+    section.querySelector(".hint")?.remove();
+    section.querySelector(".icon-button")?.remove();
     const box = el("div", "advice-body summary-box");
-    box.textContent = payload.refused ? "The model declined to answer this one." : payload.text;
-    section.append(box);
+    box.textContent = text;
     const note = el("div", "provenance extracted");
     note.append(el("span", "dot"));
-    note.append(el("span", null, `Written by ${payload.model} from this ticket and the similar ones above — not by a person, and not checked against the system.`));
-    section.append(note);
+    note.append(el("span", null, "Written by Claude from the tickets on this page — not by a person, and not checked against the system."));
+    section.append(box, note);
+    return box;
   };
 
   if (cached) {
@@ -1637,54 +1708,108 @@ function adviceSection(detail) {
     return section;
   }
 
-  const button = el("button", "icon-button", "Ask Claude what to check");
-  const hint = el("div", "hint", "Sends this ticket and its nearest earlier tickets to Claude. Nothing is sent until you click.");
-  section.append(hint, button);
+  const button = el("button", "icon-button", buttonLabel);
+  section.append(el("div", "hint", hint), button);
 
   button.onclick = async () => {
     button.disabled = true;
-    button.innerHTML = '<span class="spinner"></span> thinking…';
+    button.innerHTML = '<span class="spinner"></span> reading the tickets…';
+    let box = null;
     try {
-      const response = await fetch(`${API}/ops-advise`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ticket: {
-            key: detail.key,
-            summary: detail.summary,
-            status: detail.status,
-            topic: detail.topicLabel,
-            components: detail.components,
-            loans: detail.loans,
-            description: detail.description,
-            fix: detail.digest?.fix?.text || "",
-          },
-          // The similar tickets are already in memory, so the server does not
-          // need to go back to Jira for them.
-          similar: similarTo(detail).map((match) => ({
-            key: match.issue.key,
-            summary: match.issue.summary,
-            status: match.issue.status,
-            fix: match.issue.preview || "",
-          })),
-        }),
+      const text = await askClaude(buildPrompt(), {
+        onText: ({ text: soFar }) => {
+          // onText carries the WHOLE answer so far, so it is assigned.
+          if (!box) box = render(soFar);
+          else box.textContent = soFar;
+        },
       });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "failed");
-      state.adviceCache.set(detail.key, payload);
-      button.remove();
-      hint.remove();
-      render(payload);
+      state.adviceCache.set(cacheKey, text);
+      if (box) box.textContent = text;
+      else render(text);
     } catch (error) {
+      if (error?.code === "cancelled") return;
       button.disabled = false;
-      button.textContent = "Ask Claude what to check";
-      const failure = el("div", "banner error", error.message);
+      button.textContent = buttonLabel;
+      const failure = el("div", "banner error", error.message || "Could not reach Claude.");
       failure.style.marginTop = "8px";
       section.append(failure);
     }
   };
 
   return section;
+}
+
+/** Everything on a ticket, handed to Claude in one go. */
+function ticketSummaryPrompt(detail) {
+  const settled = isResolved(detail);
+  const lines = [
+    `Ticket ${detail.key} on a Salesforce-based peer-to-peer lending platform.`,
+    `Summary: ${detail.summary}`,
+    `Status: ${detail.status} · Topic: ${detail.topicLabel} · Priority: ${detail.priority}`,
+    `Components: ${(detail.components || []).join(", ") || "none"} · Loans: ${(detail.loans || []).join(", ") || "none"}`,
+    `Raised ${fmtDate(detail.created)} by ${detail.reporter?.name || "unknown"}${detail.resolved ? `, closed ${fmtDate(detail.resolved)}` : ", still open"}.`,
+    "",
+    "What was reported:",
+    truncate(detail.description || "", 3000) || "(no description)",
+  ];
+
+  if (detail.resolutionComments) {
+    lines.push("", "Resolution Comments recorded in Jira:", truncate(detail.resolutionComments, 1500));
+  }
+
+  if ((detail.thread || []).length) {
+    lines.push("", "The full comment thread, in order:");
+    for (const comment of detail.thread) {
+      lines.push(`- ${comment.author} (${fmtDate(comment.created)}): ${truncate(comment.body, 900)}`);
+    }
+  } else {
+    lines.push("", "There are no comments on this ticket.");
+  }
+
+  const neighbours = similarTo(detail);
+  if (neighbours.length) {
+    lines.push("", "Similar earlier tickets, for context:");
+    for (const match of neighbours) {
+      const other = state.detailCache.get(match.issue.key);
+      lines.push(
+        `- ${match.issue.key} (${match.why}): ${match.issue.summary}`,
+        `  fix: ${truncate(other?.digest?.fix?.text || match.issue.preview || "", 350) || "(none recorded)"}`
+      );
+    }
+  }
+
+  lines.push(
+    "",
+    "Explain this ticket to someone picking it up cold. Plain prose, no preamble, short sections with bold headings:",
+    "**What happened** — the problem in one or two sentences, in plain language.",
+    "**How it played out** — what the thread actually established, including any dead ends. Skip the pleasantries.",
+    settled
+      ? "**What resolved it** — the fix, concretely. If the thread never records one, say so plainly rather than inferring."
+      : "**Probable fix** — this ticket is not resolved. Suggest what most likely fixes it, grounded in the thread and the similar tickets above, most likely first. Be explicit that this is a suggestion, not a recorded fix.",
+    "Do not invent record ids, field names or fixes that are not in the material above."
+  );
+  return lines.join("\n");
+}
+
+/** The whole-ticket summary, shown at the top of the ticket panel. */
+function showTicketSummary(detail, trigger) {
+  const body = $("drawer").querySelector(".drawer-body");
+  if (!body) return;
+  body.querySelector(".ticket-summary")?.remove();
+
+  const panel = aiPanel({
+    title: "In plain language",
+    hint: "Sends the description, the whole thread and any recorded resolution to Claude.",
+    buttonLabel: "✦ Summarise",
+    cacheKey: `ticket:${detail.key}`,
+    buildPrompt: () => ticketSummaryPrompt(detail),
+  });
+  panel.classList.add("ticket-summary");
+  body.prepend(panel);
+  body.scrollTop = 0;
+  // The click on the header button was the intent; do not ask twice.
+  panel.querySelector(".icon-button")?.click();
+  if (trigger) trigger.disabled = true;
 }
 
 /**
@@ -1786,12 +1911,7 @@ function similarTo(detail) {
 function ckUserNode(issue) {
   const name = issue.ckUser?.name;
   if (!name) return el("span", null, "— not set —");
-  const chip = el("span", "chip person", name);
-  if (state.meta?.me && issue.ckUser?.email === state.meta.me) {
-    chip.classList.add("is-me");
-    chip.title = "That's you";
-  }
-  return chip;
+  return el("span", "chip person", name);
 }
 
 /** Work time with its goal and breach state, as one readable line. */
@@ -1835,9 +1955,25 @@ async function openTicket(key) {
     if (state.openTicket === key) renderDrawer(detail);
   } catch (error) {
     if (state.openTicket !== key) return;
-    drawer.querySelector(".drawer-body").innerHTML = "";
-    drawer.querySelector("#drawer-title").textContent = "Could not load this ticket";
-    drawer.querySelector(".drawer-body").append(el("div", "banner error", error.message));
+    // renderDrawer clears the panel before it builds, so by the time a failure
+    // inside it lands here the loading skeleton is gone. Rebuild a minimal
+    // shell rather than writing into elements that no longer exist — which
+    // silently replaced the real error with a null-property one.
+    console.error("ticket panel failed", error);
+    drawer.innerHTML = "";
+    const head = el("div", "drawer-head");
+    const row = el("div", "row");
+    row.append(el("span", "key", key));
+    const close = el("button", "icon-button", "Close");
+    close.style.marginLeft = "auto";
+    close.onclick = closeDrawer;
+    row.append(close);
+    const title = el("h2", null, "Could not load this ticket");
+    title.id = "drawer-title";
+    head.append(row, title);
+    const body = el("div", "drawer-body");
+    body.append(el("div", "banner error", error.message));
+    drawer.append(head, body);
   }
 }
 
@@ -1860,6 +1996,13 @@ function renderDrawer(detail) {
   link.target = "_blank";
   link.rel = "noopener";
   row.append(link);
+
+  if (state.adviceAvailable) {
+    const summarise = el("button", "icon-button", "✦ Summarise with Claude");
+    summarise.title = "Read the description, the whole thread and any resolution, and explain this ticket simply";
+    summarise.onclick = () => showTicketSummary(detail, summarise);
+    row.append(summarise);
+  }
   const close = el("button", "icon-button", "Close");
   close.style.marginLeft = "auto";
   close.onclick = closeDrawer;
@@ -1937,8 +2080,6 @@ function renderDrawer(detail) {
     section.append(list);
     body.append(section);
   }
-
-  if (state.adviceAvailable) body.append(adviceSection(detail));
 
   // Where the ticket's life actually went.
   const lifeline = statusLifeline(detail);
@@ -2121,10 +2262,12 @@ function summarySection(heading, summary, detail, kind) {
     section.append(note);
   }
 
+  const buttons = el("div", "summary-actions");
   const editButton = el("button", "icon-button", editLabel);
-  editButton.style.marginTop = "8px";
-  editButton.onclick = () => showNoteEditor(section, editButton, detail, kind, summary);
-  section.append(editButton);
+  editButton.onclick = () => showNoteEditor(section, buttons, detail, kind, summary);
+  buttons.append(editButton);
+
+  section.append(buttons);
 
   return section;
 }
@@ -2195,7 +2338,11 @@ function queueDefinitions() {
   // something doing. A reopened ticket that has since been closed again is
   // history, not a job — its count still appears in the blurb so the quality
   // signal is not lost.
-  const open = visibleIssues().filter((i) => !isResolved(i));
+  //
+  // "Live" rather than "not closed": Q2 is terminal here, so escalated tickets
+  // are excluded from every list except the Q2 register itself, which is a
+  // reference of what went out rather than a queue of work.
+  const open = visibleIssues().filter(isLive);
   const allIssues = visibleIssues();
   const ageOf = (issue) => ageDays(issue) ?? 0;
   const everReopened = allIssues.filter((i) => reopenCount(i) > 0).length;
@@ -2221,9 +2368,10 @@ function queueDefinitions() {
     {
       id: "escalated",
       title: "Escalated to Q2",
-      blurb: "With the product help desk. We could not fix these — worth chasing, and worth counting.",
+      blurb:
+        "Handed to the product help desk. Terminal here — the ticket stays in Q2 and a fresh one is raised if the problem returns. A register of what the team could not fix, not a queue of work.",
       tone: "urgent",
-      rows: open.filter(isEscalated).sort((x, y) => ageOf(y) - ageOf(x)),
+      rows: visibleIssues().filter(isEscalated).sort((x, y) => ageOf(y) - ageOf(x)),
       meta: (i) => `open ${ageOf(i)}d · raised ${fmtDate(i.created)}`,
     },
     {
@@ -2240,7 +2388,8 @@ function queueDefinitions() {
       blurb: "Our work is done. These close themselves once the client confirms — chase if they linger.",
       tone: "done",
       rows: open.filter((i) => outcome(i) === "signoff").sort((x, y) => ageOf(y) - ageOf(x)),
-      meta: (i) => `waiting ${ageOf(i)}d`,
+      // The reporter is who to chase for the sign-off, so it belongs on the row.
+      meta: (i) => `waiting ${ageOf(i)}d · raised by ${reporterName(i)}`,
     },
     {
       id: "unowned",
@@ -2316,7 +2465,9 @@ function raisedRows() {
     }
     const group = groups.get(name);
     group.total += 1;
-    if (!isResolved(issue)) group.open += 1;
+    // Live, not merely "not closed": a ticket escalated to Q2 is terminal here,
+    // so counting it as open made this column read three times too high.
+    if (isLive(issue)) group.open += 1;
     if (/^(Highest|High)$/.test(issue.priority)) group.highest += 1;
     if (reopenCount(issue)) group.reopened += 1;
     if (isEscalated(issue)) group.escalated += 1;
@@ -2917,6 +3068,51 @@ function renderReportCharts(data, years) {
   });
 }
 
+/**
+ * Hand over the report.
+ *
+ * `window.print()` is the right answer wherever the host allows it — the print
+ * stylesheet already lays the report out for paper. An embedded viewer blocks
+ * printing outright, so there the report is written to a standalone HTML file
+ * instead, charts converted to images, which opens and prints anywhere.
+ */
+async function exportReport() {
+  const downloads = await window.claude?.use?.("downloads");
+  if (!downloads) {
+    window.print();
+    return;
+  }
+
+  const report = $("report");
+  const clone = report.cloneNode(true);
+  // Canvases do not survive cloning; each becomes a picture of itself.
+  const sources = [...report.querySelectorAll("canvas")];
+  clone.querySelectorAll("canvas").forEach((canvas, index) => {
+    const image = document.createElement("img");
+    try {
+      image.src = sources[index].toDataURL("image/png");
+    } catch {
+      /* leave it out rather than emit a broken image */
+    }
+    image.style.cssText = "width:100%;height:auto";
+    canvas.replaceWith(image);
+  });
+  clone.querySelectorAll(".no-print").forEach((node) => node.remove());
+
+  const styles = [...document.querySelectorAll("style")].map((node) => node.textContent).join("\n");
+  const title = `OPS year-on-year — ${new Date().toISOString().slice(0, 10)}`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>${styles}
+body{background:var(--bg);margin:0;padding:24px}.panel{border:0}#report-charts{display:block}
+#report-charts .chart-panel{border:0;padding:0;margin:0 0 18px;break-inside:avoid}</style></head><body>${clone.outerHTML}</body></html>`;
+
+  try {
+    await downloads.save({ filename: `${title}.html`, data: html });
+  } catch (error) {
+    if (error?.code === "declined") return;
+    showCsvFallback("Could not save the report: " + (error?.message || "unknown error"), "error");
+  }
+}
+
 /** The report as a spreadsheet, for anyone who wants to take the numbers away. */
 function exportReportCsv() {
   const data = state.reportData;
@@ -2943,12 +3139,86 @@ function exportReportCsv() {
   // Quote every field: reporter names contain commas, and one unquoted comma
   // silently shifts an entire row.
   const csv = rows.map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = `ops-year-on-year-${new Date().toISOString().slice(0, 10)}.csv`;
-  link.click();
-  URL.revokeObjectURL(link.href);
+  const filename = `ops-year-on-year-${new Date().toISOString().slice(0, 10)}.csv`;
+  saveTextFile(filename, csv);
+}
+
+/**
+ * Hand the viewer a file, by whichever route this host allows.
+ *
+ * Three environments, one path: published as an Artifact the page asks the
+ * platform to save it (a link the page starts itself is inert there); served
+ * from Netlify an ordinary download link works; and if neither can, the text
+ * goes on screen to copy, because a button that silently does nothing is worse
+ * than one that admits it.
+ */
+async function saveTextFile(filename, text) {
+  try {
+    const downloads = await window.claude?.use?.("downloads");
+    if (downloads) {
+      await downloads.save({ filename, data: text });
+      return;
+    }
+  } catch (error) {
+    // "declined" is the viewer saying no — respect it and stop.
+    if (error?.code === "declined") return;
+    // Anything else falls through to the routes below.
+  }
+
+  try {
+    const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.rel = "noopener";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+    if (!window.__downloadsBlocked) return;
+  } catch {
+    /* fall through to the copyable panel */
+  }
+
+  showCsvFallback(text, filename);
+}
+
+/** The CSV on screen, selectable and copyable, when a download cannot start. */
+function showCsvFallback(csv, filename) {
+  const modal = $("chart-modal");
+  modal.innerHTML = "";
+  const head = el("div", "chart-modal-head");
+  const titles = el("div");
+  titles.append(el("h2", null, filename));
+  titles.append(el("div", "sub", "Downloads are not available here. Select all and copy, or use Save as PDF for the formatted report."));
+  head.append(titles);
+  const copy = el("button", "primary-button", "Copy to clipboard");
+  copy.style.marginLeft = "auto";
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(csv);
+      copy.textContent = "Copied";
+    } catch {
+      copy.textContent = "Press ⌘/Ctrl+C";
+    }
+  };
+  const close = el("button", "icon-button close-x", "✕");
+  close.title = "Close (Esc)";
+  close.setAttribute("aria-label", "Close");
+  close.onclick = closeChartZoom;
+  head.append(copy, close);
+  modal.append(head);
+
+  const body = el("div", "chart-modal-body");
+  const pre = document.createElement("textarea");
+  pre.className = "csv-dump";
+  pre.readOnly = true;
+  pre.value = csv;
+  body.append(pre);
+  modal.append(body);
+  $("chart-scrim").hidden = false;
+  modal.hidden = false;
+  pre.select();
 }
 
 /** Small table builder: cells are a string, {num}, or {node}. */
@@ -3156,8 +3426,9 @@ function renderTabBadges() {
     tab.append(chip);
   };
   const issues = visibleIssues();
-  // Only what needs doing: the queues hold open tickets, so the badge does too.
-  badge("tab-queues", issues.filter((i) => !isResolved(i) && (isWithUs(i) || isEscalated(i))).length, "urgent");
+  // Only what is genuinely actionable. Q2 is terminal, so escalations are not
+  // counted here even though the register still lists them.
+  badge("tab-queues", issues.filter((i) => isLive(i) && (isWithUs(i) || outcome(i) === "signoff")).length, "urgent");
 }
 
 function renderAll() {
@@ -3183,11 +3454,9 @@ function renderAll() {
 function goHome() {
   closeDrawer();
   state.selectedLoan = null;
-  state.onlyMine = false;
   state.ticketSort = { column: "created", direction: -1 };
   state.peopleSort = { column: "delivered", direction: -1 };
 
-  $("mine-toggle").setAttribute("aria-pressed", "false");
   $("loan-search").value = "";
   $("loan-sort").value = "count";
   resetTicketFilters();
@@ -3218,8 +3487,9 @@ function showTickets(filter = {}) {
   if (filter.state) $("filter-state").value = filter.state;
   if (filter.topic) $("filter-topic").value = filter.topic;
   if (filter.priority) $("filter-priority").value = filter.priority;
-  if (filter.ck) $("filter-ck").value = filter.ck;
+  if (filter.user) $("filter-user").value = filter.user;
   if (filter.assignee) $("filter-assignee").value = filter.assignee;
+  if (filter.reporter) $("filter-reporter").value = filter.reporter;
   if (filter.loan) $("filter-loan").value = filter.loan;
   if (filter.reopened) $("filter-reopened").value = filter.reopened;
   if (filter.search) $("ticket-search").value = filter.search;
@@ -3279,19 +3549,11 @@ function init() {
     state.selectedLoan = null;
     // The picklists are rebuilt from whatever loads, so they are emptied first
     // — otherwise a name from the previous scope lingers in the list.
-    for (const id of ["filter-topic", "filter-priority", "filter-ck", "filter-assignee"]) $(id).innerHTML = "";
+    for (const id of ["filter-topic", "filter-priority", "filter-user", "filter-assignee", "filter-reporter"]) $(id).innerHTML = "";
     $("report-year-a").innerHTML = "";
     $("report-year-b").innerHTML = "";
     $("report-reporters").innerHTML = "";
     loadIndex();
-  };
-
-  $("mine-toggle").onclick = () => {
-    state.onlyMine = !state.onlyMine;
-    $("mine-toggle").setAttribute("aria-pressed", String(state.onlyMine));
-    buildLoanIndex();
-    state.selectedLoan = null;
-    renderAll();
   };
 
   $("filters-clear").onclick = clearTicketFilters;
@@ -3303,7 +3565,7 @@ function init() {
   };
   // The browser's own print-to-PDF: no dependency, and it already knows how to
   // paginate. The print stylesheet drops everything but the report.
-  $("report-print").onclick = () => window.print();
+  $("report-print").onclick = exportReport;
   $("report-csv").onclick = exportReportCsv;
   $("report-all-years").onclick = () => {
     state.reportAllYears = !state.reportAllYears;
@@ -3394,10 +3656,11 @@ function init() {
 
   // Ask once whether the optional analysis is switched on; the button only
   // exists if a key is configured server-side.
-  fetch(`${API}/ops-advise`)
-    .then((r) => r.json())
-    .then((d) => { state.adviceAvailable = Boolean(d.available); })
-    .catch(() => { state.adviceAvailable = false; });
+  claudeAvailable().then((available) => {
+    state.adviceAvailable = available;
+    // The buttons are drawn on render, so redraw once the answer is in.
+    if (available) renderAll();
+  });
 
   loadIndex();
 }

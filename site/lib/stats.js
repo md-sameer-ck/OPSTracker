@@ -90,6 +90,27 @@ export const isEscalated = (issue) => outcome(issue) === "escalated";
 export const isWithUs = (issue) => ["queued", "triage", "active", "onhold"].includes(outcome(issue));
 /** Parked with somebody else — the client, or Q2. */
 export const isWaiting = (issue) => ["signoff", "escalated"].includes(outcome(issue));
+
+/**
+ * Terminal: nothing further will happen on this ticket here.
+ *
+ * Closed is obvious. **Q2 is terminal too** — once a ticket is escalated to the
+ * product help desk it stays in that status, and when the same problem recurs
+ * the team raises a fresh ticket rather than reopening this one. So a Q2 ticket
+ * is finished as far as this queue is concerned, even though Jira still calls
+ * it "in progress".
+ *
+ * Getting this wrong made every "still open" count read three times too high:
+ * 16 of Lynda Statton's 22 supposedly-open tickets were sitting in Q2.
+ */
+export const isTerminal = (issue) => ["closed", "escalated"].includes(outcome(issue));
+
+/**
+ * Still live: something will still happen. To Do, Acknowledged, In Progress,
+ * Pending, and Waiting on Customer — the last because the client has yet to
+ * sign it off, so the ticket is not finished even though our work is.
+ */
+export const isLive = (issue) => !isTerminal(issue);
 export const isResolved = (issue) => issue?.statusCategory === "done";
 export const isOpen = (issue) => issue?.statusCategory !== "done";
 /** Currently being worked, for a work-in-progress count. */
@@ -477,9 +498,10 @@ export const isSharedDesk = (person) => SHARED_DESK.test(person?.name || "");
 export function workedBy(issue) {
   if (isSharedDesk(issue?.assignee)) {
     const ck = ckUserName(issue);
-    // On the shared account with nobody named, the individual is unrecoverable;
-    // say that rather than crediting it to the desk as if it were a person.
-    return ck === UNASSIGNED ? "CK desk (no CK user set)" : ck;
+    // Shared login with nobody named: fall back to the desk account itself,
+    // which is literally who holds it. The "no owner recorded" queue is where
+    // that gap gets chased, so it does not need flagging in every table too.
+    return ck === UNASSIGNED ? issue.assignee.name : ck;
   }
   return issue?.assignee?.name || UNASSIGNED;
 }

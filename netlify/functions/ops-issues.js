@@ -128,9 +128,6 @@ export const handler = async (event) => {
       scope,
       includeFeatureRequests,
       includeServiceRequests,
-      // Who "mine" means. The Jira login is a shared desk account, so the person
-      // using the dashboard has to be named separately — see CK_ME_EMAIL.
-      me: process.env.CK_ME_EMAIL || null,
       truncated,
       fetchedAt: new Date().toISOString(),
       coverage: "summary and description only; comment text is not indexed",

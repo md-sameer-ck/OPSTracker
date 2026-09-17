@@ -22,7 +22,6 @@
         <option value="features">Feature requests</option>
         <option value="all">Everything</option>
       </select>
-      <button class="icon-button toggle" id="mine-toggle" aria-pressed="false" hidden>Only mine</button>
       <span class="freshness" id="freshness"></span>
       <button class="icon-button" id="refresh" title="Re-fetch from Jira, bypassing the cache">↻ Refresh</button>
       <button class="icon-button" id="theme-toggle" title="Switch light / dark" aria-label="Switch light or dark theme">◐</button>
@@ -93,8 +92,9 @@
           </select>
           <select class="field" id="filter-topic" aria-label="Filter by topic"></select>
           <select class="field" id="filter-priority" aria-label="Filter by priority"></select>
-          <select class="field" id="filter-ck" aria-label="Filter by CK user"></select>
+          <select class="field" id="filter-user" aria-label="Filter by user"></select>
           <select class="field" id="filter-assignee" aria-label="Filter by assignee"></select>
+          <select class="field" id="filter-reporter" aria-label="Filter by reporter"></select>
           <select class="field" id="filter-loan" aria-label="Filter by loan linkage">
             <option value="">Any ticket</option>
             <option value="with">Names a loan</option>
@@ -119,7 +119,8 @@
               <th>Summary</th>
               <th class="sortable has-tip" data-sort="topicLabel" data-term="topic">Topic</th>
               <th>Loans</th>
-              <th class="sortable has-tip" data-sort="ck" data-term="ckUser">CK user</th>
+              <th class="sortable has-tip" data-sort="reporter" data-term="reporter">Reporter</th>
+              <th class="sortable has-tip" data-sort="user" data-term="user">User</th>
               <th class="sortable" data-sort="status">Status</th>
               <th class="sortable" data-sort="priority">Priority</th>
               <th class="sortable has-tip" data-sort="work" data-term="workTime">Work time</th>
@@ -218,7 +219,7 @@
         <table id="raised-table"><thead><tr>
           <th>Reporter</th>
           <th class="sortable num" data-raised-sort="total">Raised</th>
-          <th class="sortable num" data-raised-sort="open">Still open</th>
+          <th class="sortable num has-tip" data-raised-sort="open" data-term="live">Still live</th>
           <th class="sortable num" data-raised-sort="highest">Highest / High</th>
           <th class="sortable num has-tip" data-raised-sort="medianFirstTouch" data-term="firstTouch">Median first touch</th>
           <th class="sortable num has-tip" data-raised-sort="medianWork" data-term="workTime">Median work</th>
@@ -259,7 +260,7 @@
           <select class="field" id="report-year-b" aria-label="Comparison year" style="width:auto"></select>
           <button class="icon-button toggle" id="report-all-years" aria-pressed="false" title="Show every year side by side instead of two">All years</button>
           <button class="icon-button" id="report-csv">Export CSV</button>
-          <button class="primary-button" id="report-print">Save as PDF</button>
+          <button class="primary-button" id="report-print">Save report</button>
         </div>
       </div>
       <div class="panel-head no-print" style="padding-top:0;border-bottom:1px solid var(--border);align-items:flex-start">

@@ -112,7 +112,8 @@ a { color: var(--accent-text); }
 
 .masthead {
   position: sticky;
-  top: 0;
+  /* Clears the phone's system bar when the page runs edge to edge. */
+  top: env(safe-area-inset-top, 0px);
   z-index: 20;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
@@ -132,7 +133,12 @@ a { color: var(--accent-text); }
 .brand h1 { font-size: 17px; margin: 0; letter-spacing: -.2px; }
 .brand .tag { font-size: 12px; color: var(--text-muted); }
 
-.masthead-actions { display: flex; align-items: center; gap: 8px; }
+/* Wraps on a phone: six controls in a row are wider than the screen, and an
+   un-wrapped flex row was what pushed the whole page sideways. */
+.masthead-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.masthead-actions > * { flex: 0 1 auto; min-width: 0; }
+.brand { min-width: 0; }
+.brand .tag { overflow-wrap: anywhere; }
 
 .icon-button {
   background: var(--surface-2);
@@ -155,7 +161,7 @@ a { color: var(--accent-text); }
 
 .kpis {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
   gap: 10px;
   max-width: 1600px;
   margin: 16px auto 0;
@@ -177,13 +183,18 @@ a { color: var(--accent-text); }
 .tabs {
   display: flex;
   gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
   max-width: 1600px;
   margin: 18px auto 0;
   padding: 0 20px;
   border-bottom: 1px solid var(--border);
 }
 
+.tabs::-webkit-scrollbar { display: none; }
+
 .tab {
+  flex: 0 0 auto;
   background: none;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -201,7 +212,7 @@ main { max-width: 1600px; margin: 0 auto; padding: 18px 20px 60px; }
 
 /* ── loans: two panes ────────────────────────────────────────────────── */
 
-.split { display: grid; grid-template-columns: minmax(280px, 360px) 1fr; gap: 16px; align-items: start; }
+.split { display: grid; grid-template-columns: minmax(min(280px, 100%), 360px) 1fr; gap: 16px; align-items: start; }
 
 .panel {
   background: var(--surface);
@@ -359,7 +370,10 @@ tbody td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-a
 tbody tr:hover { background: var(--surface-hover); cursor: pointer; }
 td.key { font-family: var(--mono); font-size: 12.5px; color: var(--accent-text); white-space: nowrap; }
 td.date { color: var(--text-faint); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 12.5px; }
-td.loans { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+/* Loans, names and topics can be long. They wrap rather than forcing the table
+   wider than the screen — only genuinely atomic values (keys, dates, durations)
+   keep nowrap. */
+td.loans { font-family: var(--mono); font-size: 12px; }
 
 /* ── insights ────────────────────────────────────────────────────────── */
 
@@ -370,7 +384,7 @@ td.loans { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
    which is what makes a uniform (and therefore smaller) tile acceptable. */
 .chart-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
   gap: 16px;
   align-items: stretch;
 }
@@ -490,7 +504,7 @@ td.loans { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
 .primary-button:hover { filter: brightness(1.08); }
 .primary-button[disabled] { opacity: .55; cursor: default; }
 
-.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 10px 16px; }
 .fact .k { font-size: 11.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .4px; }
 .fact .v { font-size: 13px; }
 
@@ -567,24 +581,11 @@ td.loans { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
 }
 
 .chip.person { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); }
-.chip.person.is-me { background: var(--done-soft); border-color: var(--done); color: var(--done); font-weight: 600; }
 .chip.person.muted { color: var(--text-faint); font-style: italic; border-style: dashed; }
 .chip.breached { background: var(--urgent-soft); color: var(--urgent); border-color: transparent; }
 
-.tag-me {
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: .5px;
-  color: var(--done);
-  margin-left: 6px;
-  font-weight: 600;
-}
-
-/* Your own row, so you can find yourself in the table at a glance. */
-tbody tr.is-me-row { box-shadow: inset 3px 0 0 var(--done); }
-tbody tr.is-me-row td:first-child { padding-left: 15px; }
-
 #people-table td { white-space: nowrap; }
+#people-table td:first-child { white-space: normal; min-width: 150px; }
 #people-table td:first-child { white-space: normal; }
 
 /* ── related tickets ─────────────────────────────────────────────────── */
@@ -730,7 +731,7 @@ thead th.has-tip:hover { color: var(--accent-text); }
 
 /* ── queues ──────────────────────────────────────────────────────────── */
 
-.queue-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; align-items: start; }
+.queue-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 16px; align-items: start; }
 .queue .panel-head { gap: 8px; }
 .queue .panel-head h2 { text-transform: none; font-size: 14px; letter-spacing: 0; color: var(--text); }
 .queue-count { margin-left: auto; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -763,8 +764,9 @@ table.heatmap { font-size: 12.5px; }
 table.heatmap th { font-size: 11px; }
 table.heatmap td { border-bottom: 1px solid var(--border); }
 table.heatmap td.heat { text-align: center; font-variant-numeric: tabular-nums; border-radius: 3px; }
-table.heatmap td:first-child { white-space: nowrap; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+table.heatmap td:first-child { white-space: normal; max-width: 220px; }
 #reporter-quality td { white-space: nowrap; }
+#reporter-quality td:first-child { white-space: normal; min-width: 160px; }
 #reporter-quality tbody tr:hover { background: var(--surface-hover); }
 
 /* Model-written, and marked as such — everything else in the panel is a
@@ -820,3 +822,42 @@ table.heatmap td:first-child { white-space: nowrap; max-width: 190px; overflow: 
    clickable while it is being replaced. */
 body.is-loading main,
 body.is-loading .kpis { opacity: .45; pointer-events: none; transition: opacity .15s; }
+
+/* ── text that must be allowed to wrap ─────────────────────────────────── */
+
+/* Summaries, names and free text wrap; long unbroken strings (a pasted URL, a
+   reference with no spaces) break rather than stretching their container. */
+.tl-summary, .queue-summary, .related-summary, .summary-box, .comment .body,
+#ticket-body td:nth-child(3), #raised-table td:first-child,
+.report-body td:first-child, .rank-row .rk { overflow-wrap: anywhere; }
+
+#ticket-body td:nth-child(3) { min-width: 240px; }
+#ticket-body td:nth-child(6), #ticket-body td:nth-child(7) { white-space: normal; min-width: 110px; }
+#raised-table td:first-child { white-space: normal; min-width: 160px; }
+.queue-row .top { row-gap: 4px; }
+.chip { white-space: normal; }
+.loan-row .key, td.key, .tl-key, .rank-row .rk { white-space: nowrap; }
+
+/* The CSV shown on screen when a download cannot start. */
+.csv-dump {
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 12px;
+  resize: none;
+}
+
+.loan-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.summary-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.summary-actions[hidden] { display: none; }
+
+/* The whole-ticket summary sits above everything else in the panel. */
+.ticket-summary { border-bottom: 1px solid var(--border); padding-bottom: 14px; }
+.drawer-head .row { flex-wrap: wrap; row-gap: 6px; }

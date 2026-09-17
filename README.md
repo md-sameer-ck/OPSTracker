@@ -46,8 +46,6 @@ row clicks through to the tickets behind it.
 which topics take longest, volume over time, and the same view built from Jira's
 own Components for comparison.
 
-**Only mine.** One toggle narrows every number on every tab to your tickets.
-
 **Year on year.** Tickets *raised* this year against last, with a like-for-like
 year-to-date cut so a full year is never compared against a part year. Filter to
 any set of reporters — the finance team, or anyone — and **Save as PDF** prints
@@ -63,22 +61,24 @@ shared login with nobody named.
 **Reopens.** Read from the status history and invisible in a ticket's current
 fields — 63 of them here. The cheapest quality signal in the project.
 
-**Ask Claude what to check** *(optional, off by default)*. On a ticket, sends it
-and its nearest earlier tickets to Claude and asks what to look at first.
-Requires `ANTHROPIC_API_KEY`; without one the button does not appear and nothing
-is ever sent. Output is labelled as model-written — everything else in the panel
-is a person's words or a quoted comment, and that distinction is the point.
+**Ask Claude** *(optional, off by default)*. Two buttons, both labelled ✦:
 
-**Who raised what.** The demand side: which part of the business generates the
-load, what kind of problem each reporter brings, and how long their tickets take
-before anyone can act.
+- **On a loan**, beside *Open in Jira* — reads every ticket ever raised against
+  that loan and writes what keeps happening, the root cause as far as the
+  evidence tells it, what has fixed it before, and what to check next.
+- **On a ticket**, beside the Jira link — reads the description, the whole
+  comment thread and any recorded resolution and explains the ticket in plain
+  language. If the ticket is not resolved it suggests a probable fix instead,
+  and says plainly that it is a suggestion.
 
-**Did the fix hold?** Loans that came back after a ticket against them was
-closed — 23% within 90 days here, 9% with the same topic. The strongest evidence
-a root cause is still in place.
+Published as an Artifact the page asks Claude directly: **the viewer is prompted
+and it runs on their account, not the publisher's**. Served from Netlify it goes
+through `ops-advise` with `ANTHROPIC_API_KEY`; without one the buttons do not
+appear and nothing is ever sent.
 
-**Keyboard.** `/` jumps to the search box on whichever tab is open; `Esc` clears
-it, closes an enlarged chart, or closes the ticket panel, innermost first.
+Output is always labelled as model-written. The hand-written summary slots are
+untouched by it — everything else on these screens is a person's words or a
+quoted comment, and that distinction is what makes them trustworthy.
 
 **Hover anything abbreviated.** SLA, p90, work time, "with us", "delivered" —
 every term with a dotted underline carries its full form on hover, defined once
@@ -314,6 +314,35 @@ both routes behave identically.
 | Empty dashboard, no error | The project has no tickets matching the filters — everything was excluded as a feature or service request. See [Only production issues](#what-production-issues-excludes). |
 | A read-only token, and saving a summary fails | Expected: writing a note posts a Jira comment. Use an account that can comment. |
 
+## Publishing a read-only snapshot
+
+`scripts/export-snapshot.js` and `scripts/build-artifact.js` fold the whole
+dashboard into one self-contained HTML file — every tab, chart and ticket
+thread, with no server behind it:
+
+```bash
+node scripts/export-snapshot.js all > snapshot.json   # ~880 tickets + threads
+node scripts/build-artifact.js snapshot.json > opstracker.html
+```
+
+The page is ~4.7 MB: the app inlined, Chart.js from cdnjs (the `.umd.` build —
+cdnjs also ships an ES-module `chart.min.js` that leaves `window.Chart`
+undefined), and the data the
+Netlify functions would otherwise serve embedded as a constant. Opening a ticket
+reads from memory instead of the network, so the drawer still shows the full
+thread and the fix digest.
+
+**What a snapshot cannot do**, because there is no server to hold a Jira token:
+refresh itself, and save a fix summary back to Jira — that button reports the
+page is read-only rather than failing quietly. Printing is blocked in an
+embedded viewer too, so **Save report** writes a standalone HTML file (charts
+converted to images) instead of opening the print dialog. Everything else behaves exactly
+as the live dashboard, including all three scopes, which are filtered from the
+one exported set rather than re-fetched.
+
+`data/` is gitignored and a snapshot holds real ticket text, so treat the output
+as you would the Jira project itself.
+
 ## Deploying
 
 On Netlify: point a site at this repo and set the same variables under **Site
@@ -372,10 +401,6 @@ CK User is set on 307 of 769 production tickets. The rest are grouped under a
 named **"— not set —"** bucket rather than dropped: it is the largest single
 group, and hiding it would flatter everyone's individual numbers.
 
-**Only mine** needs to know who you are, which the shared token cannot tell it.
-Set `CK_ME_EMAIL` to the email on your Jira account — the same one the CK User
-field holds.
-
 ## The workflow, and what "open" means
 
 Jira's status categories collapse everything into new / in progress / done. The
@@ -388,14 +413,26 @@ desk's actual workflow has seven meanings:
 | In Progress | The actual work | **The only status that counts as work time** |
 | Pending | Work remaining, parked for now | Our queue — not delivered |
 | Waiting on Customer | Our work is done, awaiting client sign-off | **Delivered** |
-| Q2 | Escalated to the product help desk | **Its own outcome** — not delivered |
+| Q2 | Escalated to the product help desk | **Terminal** — its own outcome, not delivered |
 | Done / Declined / Moved to Backlog | Closed | Delivered |
 
 Two of these earn their own treatment:
 
-**Q2 is not a delivery.** Reaching Q2 means we could not fix it. Counting it as
-delivered would flatter exactly the case worth seeing — and on the live project
-those 24 tickets have been open up to **751 days**.
+**Q2 is terminal, and not a delivery.** Reaching Q2 means we could not fix it.
+The ticket then stays in that status — when the same problem recurs the team
+raises a fresh ticket rather than reopening it — so nothing further happens here.
+It is therefore neither delivered nor still open.
+
+Treating Q2 as open is an easy mistake with a large effect: it made Lynda
+Statton's "still open" read **22** when 16 of those were sitting in Q2 and only
+**6** were genuinely live. Across the project it is 36 not-closed versus 12
+actually live. The dashboard counts "still live" as To Do, Acknowledged, In
+Progress, Pending and Waiting on Customer — the last because the client has yet
+to sign it off, so the ticket is not finished even though our work is.
+
+The Q2 register in **Queues** still lists them, as a reference of what the team
+could not fix rather than a queue of work; they are excluded from the tab's
+actionable count.
 
 **Pending is still ours.** There is work remaining on it, so it stays in the
 queue rather than joining the delivered pile.
@@ -448,11 +485,21 @@ staff are assigned normally and have no CK User:
 | assignee = shared desk | 313 | 288 (92%) |
 | assignee = named person | 237 | 10 (4%) |
 
-So neither field alone answers "who worked this". The default grouping is the
-**assignee, unless it is the shared desk, in which case the CK User** — which
-turns a 304-ticket "not set" bucket into named people. Credit goes to whoever
-holds the ticket at the end, which is who finished it. Assignee, CK User and
-reporter are all still available as separate groupings.
+So neither field alone answers "who worked this". Everywhere the dashboard shows
+a **User**, it means:
+
+1. the Jira **assignee**, unless that is the shared `FOLK2FOLK CK DESK` login;
+2. then the **CK User** named on the ticket;
+3. and if that is blank, the **desk account itself** — which is literally who
+   holds it.
+
+That turns a 304-ticket "not set" bucket into named people. Credit goes to
+whoever holds the ticket at the end, which is who finished it. Step 3's gap is
+chased in the **No owner recorded** queue rather than flagged in every table.
+
+Assignee, CK User and reporter remain available as separate groupings in
+*Who's completing what*, and the ticket list filters on User, assignee and
+reporter independently.
 
 ## Two different clocks
 

@@ -84,12 +84,18 @@ export const handler = async (event) => {
     return json(400, { error: "Body must be JSON." });
   }
 
+  // Two callers: the ticket panel sends a structured ticket, and the newer
+  // summarise buttons send a prompt they have already assembled from what the
+  // page holds. Both end up as one string here.
   const ticket = body.ticket;
-  if (!ticket?.key || !new RegExp(`^${PROJECT_KEY}-\\d{1,7}$`, "i").test(ticket.key)) {
+  const rawPrompt = typeof body.prompt === "string" ? body.prompt.slice(0, 40000).trim() : "";
+  if (!rawPrompt && !ticket?.key) return json(400, { error: "Send either a prompt or a ticket." });
+  if (ticket?.key && !new RegExp(`^${PROJECT_KEY}-\\d{1,7}$`, "i").test(ticket.key)) {
     return json(400, { error: `Expected a ${PROJECT_KEY} ticket.` });
   }
 
-  const cached = cache.get(ticket.key);
+  const cacheKey = rawPrompt ? `p:${rawPrompt.length}:${rawPrompt.slice(0, 120)}` : ticket.key;
+  const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS && !body.refresh) {
     return json(200, { ...cached.payload, cached: true });
   }
@@ -115,11 +121,11 @@ export const handler = async (event) => {
       // amount of text, and the function has seconds, not minutes.
       thinking: { type: "adaptive" },
       output_config: { effort: "low" },
-      messages: [{ role: "user", content: buildPrompt({ ticket, similar: body.similar }) }],
+      messages: [{ role: "user", content: rawPrompt || buildPrompt({ ticket, similar: body.similar }) }],
     });
 
     if (response.stop_reason === "refusal") {
-      return json(200, { key: ticket.key, text: "", refused: true, model: MODEL });
+      return json(200, { key: cacheKey, text: "", refused: true, model: MODEL });
     }
 
     const text = response.content
@@ -129,13 +135,13 @@ export const handler = async (event) => {
       .trim();
 
     const payload = {
-      key: ticket.key,
+      key: cacheKey,
       text,
       model: MODEL,
       usage: { input: response.usage?.input_tokens ?? null, output: response.usage?.output_tokens ?? null },
       generatedAt: new Date().toISOString(),
     };
-    cache.set(ticket.key, { at: Date.now(), payload });
+    cache.set(cacheKey, { at: Date.now(), payload });
     return json(200, payload);
   } catch (error) {
     const status = error?.status || 502;

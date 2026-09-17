@@ -12,7 +12,7 @@ import { fieldToText, truncate, firstSentences } from "../site/lib/text.js";
 import { classify } from "../site/lib/taxonomy.js";
 import { buildDigest, scoreComment, FIX_NOTE_MARKER } from "../site/lib/digest.js";
 import { extractIssueKeys } from "../site/lib/refs.js";
-import { formatDuration, formatWorkTime, throughputBy, ckUserName, reporterName, summarise, UNASSIGNED, ticketState, isWithUs, isWaiting, isDelivered, hasSettledSla, yearOnYear, workedBy, isSharedDesk, commentUrl, outcome, isEscalated, workMs, triageMs, stoppedMs } from "../site/lib/stats.js";
+import { formatDuration, formatWorkTime, throughputBy, ckUserName, reporterName, summarise, UNASSIGNED, ticketState, isWithUs, isWaiting, isDelivered, hasSettledSla, yearOnYear, workedBy, isSharedDesk, commentUrl, outcome, isEscalated, workMs, triageMs, stoppedMs, isLive, isTerminal } from "../site/lib/stats.js";
 
 let passed = 0;
 let failed = 0;
@@ -512,9 +512,10 @@ test("who worked a ticket needs both assignee and CK User", () => {
   );
   // A named Folk2Folk assignee is the answer on its own.
   assert.equal(workedBy({ assignee: { name: "Danny Learmont" }, ckUser: null }), "Danny Learmont");
-  // Shared login with nobody named: unrecoverable, and said so rather than
-  // credited to the desk as if it were a person.
-  assert.equal(workedBy({ assignee: { name: "FOLK2FOLK CK DESK" }, ckUser: null }), "CK desk (no CK user set)");
+  // Shared login with nobody named: falls back to the desk account, which is
+  // literally who holds it. The "no owner recorded" queue chases that gap, so
+  // it does not need flagging in every table as well.
+  assert.equal(workedBy({ assignee: { name: "FOLK2FOLK CK DESK" }, ckUser: null }), "FOLK2FOLK CK DESK");
   assert.equal(workedBy({ assignee: null, ckUser: null }), UNASSIGNED);
   assert.ok(isSharedDesk({ name: "FOLK2FOLK CK DESK" }));
   assert.ok(!isSharedDesk({ name: "Andy Marsh" }));
@@ -527,6 +528,37 @@ test("comment permalinks point at the comment, not just the ticket", () => {
   );
   assert.equal(commentUrl(null, "OPS-834", "40672"), null);
   assert.equal(commentUrl("https://x", "OPS-834", null), null);
+});
+
+
+test("Q2 is terminal, so it is not counted as still open", () => {
+  // Once escalated, the ticket stays in Q2 and a fresh one is raised if the
+  // problem returns. Counting Q2 as open made "still open" read three times
+  // too high — 16 of one reporter's 22 were sitting there.
+  const q2 = { status: "Q2", statusCategory: "indeterminate" };
+  assert.equal(isTerminal(q2), true);
+  assert.equal(isLive(q2), false);
+
+  const closed = { status: "Done", statusCategory: "done" };
+  assert.equal(isTerminal(closed), true);
+
+  // Everything else is still live, including work already done but not yet
+  // signed off by the client.
+  for (const status of ["To Do", "Acknowledged", "In Progress", "Pending", "Waiting on Customer"]) {
+    assert.equal(isLive({ status, statusCategory: "indeterminate" }), true, status);
+  }
+});
+
+test("still-live excludes Q2 but keeps awaiting sign-off", () => {
+  const issues = [
+    { status: "Q2", statusCategory: "indeterminate" },
+    { status: "Q2", statusCategory: "indeterminate" },
+    { status: "In Progress", statusCategory: "indeterminate" },
+    { status: "Waiting on Customer", statusCategory: "indeterminate" },
+    { status: "Done", statusCategory: "done" },
+  ];
+  assert.equal(issues.filter(isLive).length, 2);
+  assert.equal(issues.filter(isTerminal).length, 3);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
