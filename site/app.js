@@ -31,6 +31,9 @@ const state = {
   peopleSort: { column: "delivered", direction: -1 },
   raisedSort: { column: "total", direction: -1 },
   reportAllYears: false,
+  snapshotIssues: null,
+  refreshedAt: null,
+  liveRefresh: false,
   scope: "production",
   charts: {},
   chartConfigs: {},
@@ -207,8 +210,64 @@ function clearCachedIndex() {
   }
 }
 
+/**
+ * Pull everything changed since the snapshot and merge it in.
+ *
+ * Only changed tickets are fetched — a few dozen rather than nine hundred — so
+ * it is one request and a second or two. Tickets nobody has touched keep their
+ * exported record, which is still correct.
+ *
+ * Without a connector this still does the other half of what Refresh means:
+ * drop the caches, clear the view and re-read, so the page is in its just-opened
+ * state. It says which of the two happened rather than implying fresh data.
+ */
+async function refreshSnapshot() {
+  const button = $("refresh");
+  button.disabled = true;
+  button.innerHTML = '<span class="spinner"></span> checking Jira…';
+  showWarning("");
+
+  let merged = 0;
+  let added = 0;
+  try {
+    const changed = (await window.__refreshFromJira?.(state.meta?.fetchedAt)) || null;
+    if (changed) {
+      const byKey = new Map(state.snapshotIssues.map((issue) => [issue.key, issue]));
+      for (const issue of changed) {
+        // The delta has no status history (that endpoint cannot expand it), so
+        // an existing ticket keeps the history it was exported with.
+        const previous = byKey.get(issue.key);
+        if (previous) merged += 1;
+        else added += 1;
+        byKey.set(issue.key, { ...issue, history: issue.history ?? previous?.history ?? null });
+      }
+      state.snapshotIssues = [...byKey.values()];
+      state.refreshedAt = new Date().toISOString();
+    }
+  } catch (error) {
+    showWarning(`Could not reach Jira through your Atlassian connector: ${error?.message || error}. Showing the snapshot.`);
+  }
+
+  goHome();
+  await loadIndex({ refresh: true });
+
+  if (merged || added) {
+    showWarning(
+      `Updated from Jira — ${added} new ticket${added === 1 ? "" : "s"}` +
+        `, ${merged} changed. Everything else is as exported ${relative(state.meta?.fetchedAt)}.`
+    );
+  } else if (!state.liveRefresh) {
+    showWarning(
+      "Reloaded this snapshot. To pull tickets raised since it was taken, connect Atlassian in your Claude connector settings."
+    );
+  }
+}
+
 function applyIndex(data, { fromCache = false, ageMs = 0 } = {}) {
   state.issues = data.issues || [];
+  // The snapshot page filters scopes from one exported set; keep the unfiltered
+  // list so a refresh can merge into it.
+  if (data.snapshot && !state.snapshotIssues) state.snapshotIssues = data.allIssues || data.issues;
   state.meta = data;
   buildLoanIndex();
 
@@ -242,15 +301,20 @@ function applyIndex(data, { fromCache = false, ageMs = 0 } = {}) {
 
   const refresh = $("refresh");
   if (data.snapshot) {
-    // A published snapshot carries no route back to Jira, so Refresh has
-    // nothing to fetch. Leaving it live made it look broken; it becomes the
-    // label for when this copy was taken.
-    refresh.textContent = `Snapshot · ${fmtDate(data.fetchedAt)}`;
-    refresh.disabled = true;
-    refresh.classList.add("is-static");
-    refresh.title = `A frozen copy of the OPS queue, exported ${fmtDateTime(data.fetchedAt)}. It cannot refresh itself — open the live dashboard for current data.`;
-    $("freshness").textContent = `${relative(data.fetchedAt)} · read-only`;
-    $("freshness").classList.remove("stale");
+    // A snapshot has no server, but the viewer may have the Atlassian
+    // connector — in which case Refresh pulls everything changed since the
+    // export and merges it, so a ticket raised afterwards is reachable.
+    refresh.textContent = "↻ Refresh";
+    refresh.disabled = false;
+    refresh.classList.remove("is-static");
+    refresh.title = state.liveRefresh
+      ? "Fetch everything changed since this snapshot, from Jira, using your own Atlassian connector"
+      : `A frozen copy exported ${fmtDateTime(data.fetchedAt)}. Connect Atlassian in Claude to pull changes since then.`;
+    const stamp = state.refreshedAt
+      ? `updated ${fmtDateTime(state.refreshedAt)}`
+      : `snapshot · ${relative(data.fetchedAt)}`;
+    $("freshness").textContent = stamp;
+    $("freshness").classList.toggle("stale", !state.refreshedAt);
   } else {
     const stamp = fromCache
       ? `from this browser, ${relative(data.fetchedAt)}`
@@ -341,9 +405,7 @@ async function loadIndex({ refresh = false } = {}) {
     $("loan-list").innerHTML = "";
     $("loan-detail").innerHTML = '<div class="empty-state">Nothing loaded.</div>';
   } finally {
-    // A snapshot's Refresh stays disabled — applyIndex has turned it into a
-    // label by this point.
-    if (!state.meta?.snapshot) button.disabled = false;
+    button.disabled = false;
     setBusy(false);
   }
 }
@@ -3552,9 +3614,17 @@ function init() {
 
   $("home").onclick = goHome;
 
-  $("refresh").onclick = () => {
+  $("refresh").onclick = async () => {
+    // Refresh means "as though the page had just been opened": caches dropped,
+    // every filter and selection cleared, data re-read.
     state.detailCache.clear();
+    state.adviceCache.clear();
     clearCachedIndex();
+
+    if (state.meta?.snapshot) {
+      await refreshSnapshot();
+      return;
+    }
     loadIndex({ refresh: true });
   };
 
@@ -3671,6 +3741,15 @@ function init() {
 
   // Ask once whether the optional analysis is switched on; the button only
   // exists if a key is configured server-side.
+  // Does this viewer have the Atlassian connector? Only a snapshot cares.
+  (async () => {
+    try {
+      state.liveRefresh = Boolean(await window.claude?.use?.("mcp"));
+    } catch {
+      state.liveRefresh = false;
+    }
+  })();
+
   claudeAvailable().then((available) => {
     state.adviceAvailable = available;
     // The buttons are drawn on render, so redraw once the answer is in.
@@ -3688,4 +3767,5 @@ function debounce(fn, ms) {
   };
 }
 
+window.__state = state;
 init();

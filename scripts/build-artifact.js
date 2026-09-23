@@ -65,7 +65,7 @@ function trim(data) {
 const trimmed = trim(snapshot);
 
 // Dependency order: each file may use the ones before it, none after.
-const LIB_ORDER = ["refs.js", "text.js", "taxonomy.js", "digest.js", "stats.js"];
+const LIB_ORDER = ["refs.js", "text.js", "taxonomy.js", "digest.js", "stats.js", "jira.js"];
 
 /** Strip the module syntax so the files can share one scope. */
 function flatten(source) {
@@ -122,11 +122,101 @@ ${libs}
 // downloads capability is unavailable the app goes straight to showing the text.
 window.__downloadsBlocked = true;
 
+// ── refreshing a frozen page ──────────────────────────────────────────
+//
+// The snapshot cannot call Jira: there is no server and no token. But the
+// viewer may have the Atlassian connector, and an artifact can call a viewer's
+// own connectors with their credentials — nothing secret is in this page.
+//
+// So Refresh asks Jira for everything CHANGED since the snapshot was taken and
+// merges it in. That is a few dozen tickets rather than nine hundred, so it is
+// one request, and it is the case that matters: a ticket raised after the
+// export is otherwise invisible here for good.
+const JIRA_HOST = (SNAPSHOT.index.jiraBase || "").replace(/^https?:\\/\\//, "");
+// Viewers resolve connectors by their DISPLAY name, which is not the tool-name
+// segment: mcp__claude_ai_Atlassian_Rovo__* is shown to viewers as
+// "Atlassian Rovo". Passing anything else silently matches no connector.
+const CONNECTOR = "Atlassian Rovo";
+const REFRESH_TOOL = "searchJiraIssuesUsingJql";
+const DETAIL_TOOL = "getJiraIssue";
+
+/** The connector, or null when this viewer has not connected it. */
+async function jiraConnector() {
+  try {
+    return (await window.claude?.use?.("mcp")) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Unwrap whatever shape the connector returns. */
+function toolPayload(result) {
+  const payload = result?.payload ?? result;
+  if (typeof payload !== "string") return payload;
+  try {
+    return JSON.parse(payload);
+  } catch {
+    return null;
+  }
+}
+
+window.__refreshFromJira = async function refreshFromJira(sinceIso) {
+  const mcp = await jiraConnector();
+  if (!mcp || !JIRA_HOST) return null;
+
+  const since = (sinceIso || SNAPSHOT.index.fetchedAt || "").slice(0, 10);
+  const result = await mcp.callTool(CONNECTOR, REFRESH_TOOL, {
+    cloudId: JIRA_HOST,
+    jql: \`project = \${SNAPSHOT.index.project || "OPS"} AND updated >= "\${since}" ORDER BY updated DESC\`,
+    fields: BASE_FIELDS,
+    maxResults: 100,
+  });
+
+  const nodes = toolPayload(result)?.issues?.nodes || [];
+  // Shaped by exactly the same code the server uses, so a refreshed ticket is
+  // indistinguishable from an exported one — minus its status history, which
+  // this endpoint cannot expand.
+  return nodes.map((issue) => normaliseIssue(issue));
+};
+
+/** One ticket's thread, for a ticket raised after the snapshot was taken. */
+window.__fetchTicketFromJira = async function fetchTicketFromJira(key) {
+  const mcp = await jiraConnector();
+  if (!mcp || !JIRA_HOST) return null;
+  const result = await mcp.callTool(CONNECTOR, DETAIL_TOOL, {
+    cloudId: JIRA_HOST,
+    issueIdOrKey: key,
+    fields: [...BASE_FIELDS, "comment"],
+  });
+  const issue = toolPayload(result)?.issues?.nodes?.[0];
+  if (!issue) return null;
+
+  const record = normaliseIssue(issue, { full: true });
+  const comments = (issue.fields?.comment?.comments || []).map((c) => ({
+    id: c.id,
+    author: c.author?.displayName || "Unknown",
+    authorId: c.author?.accountId || null,
+    body: fieldToText(c.body),
+    created: c.created,
+  }));
+  const digest = buildDigest({
+    summary: record.summary,
+    description: record.description,
+    resolutionComments: record.resolutionComments,
+    comments,
+    assigneeId: record.assignee?.accountId || null,
+    reporterId: record.reporter?.accountId || null,
+  });
+  return { ...record, url: \`\${SNAPSHOT.index.jiraBase}/browse/\${issue.key}\`, digest, thread: digest.thread };
+};
+
 const SNAPSHOT_INDEX_BY_KEY = new Map(SNAPSHOT.index.issues.map((issue) => [issue.key, issue]));
 
 /** The scopes the live server computes, applied here to the one exported set. */
 function scopedIndex(scope) {
-  const all = SNAPSHOT.index.issues;
+  // state.snapshotIssues holds the exported set plus anything merged in by a
+  // refresh; it falls back to the export on first load.
+  const all = window.__state?.snapshotIssues || SNAPSHOT.index.issues;
   const isFeature = (i) => i.requestType === SNAPSHOT.index.featureRequestType;
   const isServiceRequest = (i) => i.opsType === "Service Request";
 
@@ -143,6 +233,7 @@ function scopedIndex(scope) {
     excludedFeatureRequests: scope === "production" ? all.filter(isFeature).length : 0,
     excludedServiceRequests: scope === "production" ? all.filter(isServiceRequest).length : 0,
     snapshot: true,
+    allIssues: all,
     fetchedAt: SNAPSHOT.index.fetchedAt,
   };
 }
@@ -166,7 +257,12 @@ window.fetch = async (input, init) => {
   if (url.includes("/ops-issue?")) {
     const key = new URL(url, location.href).searchParams.get("key");
     const detail = SNAPSHOT.details[key];
-    if (!detail) return jsonResponse(404, { error: key + ' is not in this snapshot.' });
+    if (!detail) {
+      // Raised after the export: fetch it live if the viewer's connector allows.
+      const live = await window.__fetchTicketFromJira(key).catch(() => null);
+      if (live) return jsonResponse(200, live);
+      return jsonResponse(404, { error: key + ' was raised after this snapshot was taken, and your Atlassian connector is not available to load it.' });
+    }
     // Detail records were trimmed of everything the index already holds.
     return jsonResponse(200, { ...(SNAPSHOT_INDEX_BY_KEY.get(key) || {}), ...detail });
   }

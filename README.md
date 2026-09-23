@@ -332,10 +332,28 @@ Netlify functions would otherwise serve embedded as a constant. Opening a ticket
 reads from memory instead of the network, so the drawer still shows the full
 thread and the fix digest.
 
-**What a snapshot cannot do**, because there is no server to hold a Jira token:
-refresh itself — the Refresh button becomes a `Snapshot · <date>` label, since a
-control that re-renders the same frozen data reads as broken — and save a fix
-summary back to Jira — that button reports the
+### Refreshing a published snapshot
+
+The page has no server and no Jira token, but a viewer may have the **Atlassian
+connector** in Claude — and an artifact can call a viewer's own connectors with
+their credentials. So Refresh asks Jira for everything *changed since the export*
+and merges it in. That is a few dozen tickets rather than nine hundred, so it is
+one request, and it covers the case that matters: a ticket raised after the
+export is otherwise invisible in the snapshot for good. Opening such a ticket
+fetches its thread the same way.
+
+Refreshed tickets carry no status history — the connector's search cannot expand
+a changelog — so their work time and reopen count show as unknown until the next
+full export. Tickets that already existed keep the history they were exported
+with.
+
+Without the connector, Refresh still does the other half of what it means: drops
+the caches, clears every filter and selection, and re-reads — the just-opened
+state — and says plainly that it reloaded the snapshot rather than implying fresh
+data.
+
+**What a snapshot still cannot do**, because there is no server to hold a Jira
+token: save a fix summary back to Jira — that button reports the
 page is read-only rather than failing quietly. Printing is blocked in an
 embedded viewer too, so **Save report** writes a standalone HTML file (charts
 converted to images) instead of opening the print dialog. Everything else behaves exactly
@@ -648,6 +666,8 @@ site/
     refs.js         loan/entity reference extraction and normalisation
     taxonomy.js     the 17 topics and the classifier
     digest.js       issue/fix extraction, comment scoring, note markers
+    jira.js         the custom-field map and the raw-issue normaliser, shared by
+                    the functions, the exporter and the published page
     text.js         Jira rich-text cleanup (mentions, pasted screenshots, ADF)
     stats.js        throughput, medians, the two clocks, duration formatting
 netlify/functions/
