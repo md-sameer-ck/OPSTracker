@@ -244,10 +244,24 @@ forward if 9000 is busy.
 npm test
 ```
 
-41 cases over reference normalisation, text cleanup, classification, fix
+48 cases over reference normalisation, text cleanup, classification, fix
 extraction, ticket cross-references, ticket state and throughput maths. No
 network and no credentials — they run against fixed strings taken from real
 tickets.
+
+`npm test` covers the maths. The UI has its own harness — it drives a real
+browser through every tab, asserts the charts actually drew, clicks Refresh and
+checks the dataset is still whole afterwards:
+
+```bash
+npm i -D playwright-core          # once; drives your installed Chrome
+npm run smoke -- local            # against the dev server
+npm run smoke -- artifact opstracker.html
+```
+
+Several bugs here were invisible to unit tests and obvious within seconds of
+loading the page: a 404'd chart CDN, a grid that scrolled sideways on a phone,
+a refresh that silently did nothing.
 
 ## While you are working on it
 
@@ -325,7 +339,7 @@ node scripts/export-snapshot.js all > snapshot.json   # ~880 tickets + threads
 node scripts/build-artifact.js snapshot.json > opstracker.html
 ```
 
-The page is ~4.7 MB: the app inlined, Chart.js from cdnjs (the `.umd.` build —
+The page is ~4.9 MB: the app inlined, Chart.js from cdnjs (the `.umd.` build —
 cdnjs also ships an ES-module `chart.min.js` that leaves `window.Chart`
 undefined), and the data the
 Netlify functions would otherwise serve embedded as a constant. Opening a ticket
@@ -346,6 +360,24 @@ Refreshed tickets carry no status history — the connector's search cannot expa
 a changelog — so their work time and reopen count show as unknown until the next
 full export. Tickets that already existed keep the history they were exported
 with.
+
+**The snapshot is a floor, never overwritten.** What Refresh returns is kept
+separately, in `opstracker-delta-v3`, and merged *over* the embedded snapshot on
+every load; the page reads the union. This matters more than it sounds. The
+earlier design let a refresh replace the dataset, so one refresh against a cache
+written by an older build cut 879 tickets to 614 — and because the result was
+cached, reopening the page showed the damage rather than recovering from it. A
+delta that can only add cannot do that, whatever state the cache is in. The
+cache key carries a version for the same reason: bump `CACHE_VERSION` in
+`site/app.js` whenever the cached shape changes, or old browsers keep feeding
+new code a record it no longer understands.
+
+The viewer's connector identifies a Jira site by **cloudId**, not by hostname —
+a hostname answers `403 The app is not installed on this instance`, which is
+indistinguishable from not having the connector at all. The exporter reads the
+cloudId from `/_edge/tenant_info` and bakes it into the snapshot. Refresh also
+reports what it did every time, including when nothing changed; a button that
+can silently do nothing is a button users correctly assume is broken.
 
 Without the connector, Refresh still does the other half of what it means: drops
 the caches, clears every filter and selection, and re-reads — the just-opened

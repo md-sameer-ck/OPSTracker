@@ -22,7 +22,7 @@
 // comment is not in this index. The UI's "search Jira comments too" button
 // exists for exactly that case, and asks Jira directly.
 
-import { getCredentials, json, preflight, scopedJql, searchAll, PROJECT_KEY } from "./_jira.js";
+import { getCredentials, jiraFetch, json, preflight, scopedJql, searchAll, PROJECT_KEY } from "./_jira.js";
 import { BASE_FIELDS, FEATURE_REQUEST_TYPE, PRODUCTION_REQUEST_TYPE, SERVICE_REQUEST_TYPE, normaliseIssue } from "./_fields.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -113,9 +113,16 @@ export const handler = async (event) => {
       },
     });
 
+    // The MCP connector in the published artifact keys sites by cloudId, not by
+    // hostname, and answers 403 for a hostname. Jira hands it out unauthenticated.
+    const cloudId = await jiraFetch("/_edge/tenant_info", { credentials })
+      .then((info) => info?.cloudId || null)
+      .catch(() => null);
+
     const payload = {
       project: PROJECT_KEY,
       jiraBase: `https://${credentials.domain}`,
+      cloudId,
       jql,
       total: issues.length,
       fetchedFromJira: total,

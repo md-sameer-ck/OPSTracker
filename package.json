@@ -6,12 +6,14 @@
   "description": "Loan-centric tracker for the Jira OPS project (Salesforce Operational Issues) \u2014 groups every OPS ticket under the loan account it touches, and surfaces the org's most common recurring errors.",
   "scripts": {
     "dev": "node scripts/dev-server.js",
-    "test": "node scripts/lib.test.js"
+    "test": "node scripts/lib.test.js",
+    "smoke": "node scripts/smoke.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@anthropic-ai/sdk": "^0.71.0"
+    "@anthropic-ai/sdk": "^0.71.0",
+    "playwright-core": "^1.56.0"
   }
 }

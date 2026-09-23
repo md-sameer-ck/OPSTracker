@@ -31,8 +31,6 @@ const state = {
   peopleSort: { column: "delivered", direction: -1 },
   raisedSort: { column: "total", direction: -1 },
   reportAllYears: false,
-  snapshotIssues: null,
-  refreshedAt: null,
   liveRefresh: false,
   scope: "production",
   charts: {},
@@ -43,9 +41,11 @@ const state = {
   adviceCache: new Map(),
 };
 
-// Bump when the index record shape changes, so a cached copy from an older
-// build is discarded rather than rendered with missing fields.
-const CACHE_VERSION = "v2";
+// Bump when the stored payload's shape changes, so a cached copy from an older
+// build is discarded rather than rendered with missing fields. It was NOT
+// bumped when `allIssues` was added, so older caches were still being read and
+// the missing field silently collapsed the dataset to a subset of itself.
+const CACHE_VERSION = "v3";
 const cacheKeyFor = (scope) => `opstracker-index-${CACHE_VERSION}-${scope}`;
 const etagKeyFor = (scope) => `opstracker-etag-${CACHE_VERSION}-${scope}`;
 // How long a browser copy is served without asking Jira at all. Building the
@@ -160,6 +160,22 @@ function showError(message) {
   banner.hidden = !message;
 }
 
+/**
+ * Connector failures arrive as raw tool JSON, which is no use to the person
+ * reading the banner. The two that actually happen have a specific remedy, and
+ * naming it is the difference between "it's broken" and "ask your admin".
+ */
+function explainJiraFailure(error) {
+  const text = String(error?.message || error || "");
+  if (/not installed on this instance|\b403\b|forbidden/i.test(text)) {
+    return "Jira refused the connection: your Atlassian organisation has not allowed Claude to use the Rovo MCP server. An organisation admin can turn it on under Atlassian Administration → Rovo → Rovo MCP server → Permissions.";
+  }
+  if (/\b401\b|unauthor/i.test(text)) {
+    return "Jira rejected your Atlassian connector's credentials — reconnecting it in your Claude connector settings usually fixes this.";
+  }
+  return `Could not reach Jira: ${text}.`;
+}
+
 function showWarning(message) {
   const banner = $("warn-banner");
   banner.textContent = message;
@@ -227,47 +243,38 @@ async function refreshSnapshot() {
   button.innerHTML = '<span class="spinner"></span> checking Jira…';
   showWarning("");
 
-  let merged = 0;
-  let added = 0;
+  // Ask for everything changed since the last refresh, or since the export if
+  // this is the first one.
+  const since = state.meta?.refreshedAt || state.meta?.fetchedAt;
+  let outcome = null;
+
   try {
-    const changed = (await window.__refreshFromJira?.(state.meta?.fetchedAt)) || null;
-    if (changed) {
-      const byKey = new Map(state.snapshotIssues.map((issue) => [issue.key, issue]));
-      for (const issue of changed) {
-        // The delta has no status history (that endpoint cannot expand it), so
-        // an existing ticket keeps the history it was exported with.
-        const previous = byKey.get(issue.key);
-        if (previous) merged += 1;
-        else added += 1;
-        byKey.set(issue.key, { ...issue, history: issue.history ?? previous?.history ?? null });
-      }
-      state.snapshotIssues = [...byKey.values()];
-      state.refreshedAt = new Date().toISOString();
+    const changed = await window.__refreshFromJira?.(since);
+    if (changed === null || changed === undefined) {
+      outcome = state.liveRefresh
+        ? "Jira did not answer through your Atlassian connector. Showing what this page already holds."
+        : "Reloaded this snapshot. To pull tickets raised since it was taken, connect Atlassian in your Claude connector settings.";
+    } else {
+      const known = new Set(state.issues.map((issue) => issue.key));
+      const added = changed.filter((issue) => !known.has(issue.key)).length;
+      window.__saveDelta?.(changed, new Date().toISOString());
+      outcome = changed.length
+        ? `Updated from Jira — ${added} new ticket${added === 1 ? "" : "s"}, ${changed.length - added} changed.`
+        : "Checked Jira — nothing has changed since the last refresh.";
     }
   } catch (error) {
-    showWarning(`Could not reach Jira through your Atlassian connector: ${error?.message || error}. Showing the snapshot.`);
+    outcome = `${explainJiraFailure(error)} Showing what this page already holds.`;
   }
 
   goHome();
   await loadIndex({ refresh: true });
-
-  if (merged || added) {
-    showWarning(
-      `Updated from Jira — ${added} new ticket${added === 1 ? "" : "s"}` +
-        `, ${merged} changed. Everything else is as exported ${relative(state.meta?.fetchedAt)}.`
-    );
-  } else if (!state.liveRefresh) {
-    showWarning(
-      "Reloaded this snapshot. To pull tickets raised since it was taken, connect Atlassian in your Claude connector settings."
-    );
-  }
+  // Always say what happened. A refresh that reports nothing is the reason this
+  // button read as broken.
+  showWarning(outcome);
 }
 
 function applyIndex(data, { fromCache = false, ageMs = 0 } = {}) {
   state.issues = data.issues || [];
-  // The snapshot page filters scopes from one exported set; keep the unfiltered
-  // list so a refresh can merge into it.
-  if (data.snapshot && !state.snapshotIssues) state.snapshotIssues = data.allIssues || data.issues;
   state.meta = data;
   buildLoanIndex();
 
@@ -310,11 +317,11 @@ function applyIndex(data, { fromCache = false, ageMs = 0 } = {}) {
     refresh.title = state.liveRefresh
       ? "Fetch everything changed since this snapshot, from Jira, using your own Atlassian connector"
       : `A frozen copy exported ${fmtDateTime(data.fetchedAt)}. Connect Atlassian in Claude to pull changes since then.`;
-    const stamp = state.refreshedAt
-      ? `updated ${fmtDateTime(state.refreshedAt)}`
+    const refreshedAt = data.refreshedAt || null;
+    $("freshness").textContent = refreshedAt
+      ? `updated ${relative(refreshedAt)}`
       : `snapshot · ${relative(data.fetchedAt)}`;
-    $("freshness").textContent = stamp;
-    $("freshness").classList.toggle("stale", !state.refreshedAt);
+    $("freshness").classList.toggle("stale", !refreshedAt);
   } else {
     const stamp = fromCache
       ? `from this browser, ${relative(data.fetchedAt)}`
@@ -347,8 +354,12 @@ async function loadIndex({ refresh = false } = {}) {
   if (cached) {
     applyIndex(cached.payload, { fromCache: true, ageMs: cached.ageMs });
     if (cached.ageMs < CACHE_TTL_MS) {
-      // Fresh enough to trust outright: no request at all.
-      $("freshness").textContent = `from this browser, ${relative(cached.payload.fetchedAt)}`;
+      // Fresh enough to trust outright: no request at all. A snapshot keeps the
+      // stamp applyIndex set, which says whether it holds refreshed data —
+      // overwriting it here made a refreshed page look un-refreshed on reopen.
+      if (!cached.payload.snapshot) {
+        $("freshness").textContent = `from this browser, ${relative(cached.payload.fetchedAt)}`;
+      }
       button.disabled = false;
       return;
     }
@@ -3767,5 +3778,4 @@ function debounce(fn, ms) {
   };
 }
 
-window.__state = state;
 init();

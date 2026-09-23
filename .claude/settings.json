@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "ClaudeInChromeDomain(claude.ai)",
+      "mcp__claude-in-chrome__tabs_context_mcp"
+    ]
+  }
+}

@@ -132,7 +132,7 @@ window.__downloadsBlocked = true;
 // merges it in. That is a few dozen tickets rather than nine hundred, so it is
 // one request, and it is the case that matters: a ticket raised after the
 // export is otherwise invisible here for good.
-const JIRA_HOST = (SNAPSHOT.index.jiraBase || "").replace(/^https?:\\/\\//, "");
+const JIRA_CLOUD_ID = SNAPSHOT.index.cloudId || (SNAPSHOT.index.jiraBase || "").replace(/^https?:\\/\\//, "");
 // Viewers resolve connectors by their DISPLAY name, which is not the tool-name
 // segment: mcp__claude_ai_Atlassian_Rovo__* is shown to viewers as
 // "Atlassian Rovo". Passing anything else silently matches no connector.
@@ -162,11 +162,11 @@ function toolPayload(result) {
 
 window.__refreshFromJira = async function refreshFromJira(sinceIso) {
   const mcp = await jiraConnector();
-  if (!mcp || !JIRA_HOST) return null;
+  if (!mcp || !JIRA_CLOUD_ID) return null;
 
   const since = (sinceIso || SNAPSHOT.index.fetchedAt || "").slice(0, 10);
   const result = await mcp.callTool(CONNECTOR, REFRESH_TOOL, {
-    cloudId: JIRA_HOST,
+    cloudId: JIRA_CLOUD_ID,
     jql: \`project = \${SNAPSHOT.index.project || "OPS"} AND updated >= "\${since}" ORDER BY updated DESC\`,
     fields: BASE_FIELDS,
     maxResults: 100,
@@ -182,9 +182,9 @@ window.__refreshFromJira = async function refreshFromJira(sinceIso) {
 /** One ticket's thread, for a ticket raised after the snapshot was taken. */
 window.__fetchTicketFromJira = async function fetchTicketFromJira(key) {
   const mcp = await jiraConnector();
-  if (!mcp || !JIRA_HOST) return null;
+  if (!mcp || !JIRA_CLOUD_ID) return null;
   const result = await mcp.callTool(CONNECTOR, DETAIL_TOOL, {
-    cloudId: JIRA_HOST,
+    cloudId: JIRA_CLOUD_ID,
     issueIdOrKey: key,
     fields: [...BASE_FIELDS, "comment"],
   });
@@ -213,10 +213,55 @@ window.__fetchTicketFromJira = async function fetchTicketFromJira(key) {
 const SNAPSHOT_INDEX_BY_KEY = new Map(SNAPSHOT.index.issues.map((issue) => [issue.key, issue]));
 
 /** The scopes the live server computes, applied here to the one exported set. */
+// ── the refresh delta ─────────────────────────────────────────────────
+//
+// Refreshed tickets are kept SEPARATELY from the embedded snapshot, in their
+// own localStorage entry, and layered over it on every read.
+//
+// The earlier design merged into one mutable list and cached that. A cached
+// payload written by an older build lacked the unfiltered set, so the merge
+// ran against the production-scoped 604 instead of all 879 — and the result,
+// 614 tickets with six feature requests, was then cached as if it were the
+// whole project. A frozen base plus a delta cannot lose tickets that way: the
+// snapshot is never written to, so the worst a bad delta can do is add noise.
+const DELTA_KEY = "opstracker-delta-v3";
+
+function readDelta() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DELTA_KEY) || "null");
+    if (raw && typeof raw === "object" && raw.issues) return raw;
+  } catch {
+    /* storage blocked or corrupt — start clean */
+  }
+  return { issues: {}, at: null };
+}
+
+window.__opsDelta = readDelta();
+
+window.__saveDelta = function saveDelta(issues, at) {
+  for (const issue of issues) window.__opsDelta.issues[issue.key] = issue;
+  window.__opsDelta.at = at;
+  try {
+    localStorage.setItem(DELTA_KEY, JSON.stringify(window.__opsDelta));
+  } catch {
+    /* over quota: the refresh still applies for this view */
+  }
+};
+
+/** The snapshot with any refreshed tickets layered over it. */
+function allKnownIssues() {
+  const byKey = new Map(SNAPSHOT.index.issues.map((issue) => [issue.key, issue]));
+  for (const issue of Object.values(window.__opsDelta.issues || {})) {
+    const previous = byKey.get(issue.key);
+    // A refreshed ticket keeps the status history it was exported with: the
+    // connector's search cannot expand a changelog.
+    byKey.set(issue.key, { ...issue, history: issue.history ?? previous?.history ?? null });
+  }
+  return [...byKey.values()];
+}
+
 function scopedIndex(scope) {
-  // state.snapshotIssues holds the exported set plus anything merged in by a
-  // refresh; it falls back to the export on first load.
-  const all = window.__state?.snapshotIssues || SNAPSHOT.index.issues;
+  const all = allKnownIssues();
   const isFeature = (i) => i.requestType === SNAPSHOT.index.featureRequestType;
   const isServiceRequest = (i) => i.opsType === "Service Request";
 
@@ -233,7 +278,10 @@ function scopedIndex(scope) {
     excludedFeatureRequests: scope === "production" ? all.filter(isFeature).length : 0,
     excludedServiceRequests: scope === "production" ? all.filter(isServiceRequest).length : 0,
     snapshot: true,
-    allIssues: all,
+    // Survives a reload, so the page can say it holds refreshed data rather
+    // than reverting to "snapshot" and looking as though Refresh did nothing.
+    refreshedAt: window.__opsDelta.at || null,
+    deltaCount: Object.keys(window.__opsDelta.issues || {}).length,
     fetchedAt: SNAPSHOT.index.fetchedAt,
   };
 }
