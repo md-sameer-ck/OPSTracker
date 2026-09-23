@@ -333,7 +333,9 @@ reads from memory instead of the network, so the drawer still shows the full
 thread and the fix digest.
 
 **What a snapshot cannot do**, because there is no server to hold a Jira token:
-refresh itself, and save a fix summary back to Jira — that button reports the
+refresh itself — the Refresh button becomes a `Snapshot · <date>` label, since a
+control that re-renders the same frozen data reads as broken — and save a fix
+summary back to Jira — that button reports the
 page is read-only rather than failing quietly. Printing is blocked in an
 embedded viewer too, so **Save report** writes a standalone HTML file (charts
 converted to images) instead of opening the print dialog. Everything else behaves exactly

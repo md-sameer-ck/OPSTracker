@@ -89,7 +89,7 @@ const body = html
   .replace(/<script[^>]*><\/script>/g, "")
   .trim();
 
-process.stdout.write(`<title>OPSTracker</title>
+process.stdout.write(`<title>OPS Tracker</title>
 <meta name="description" content="Every OPS ticket grouped by the loan it touches, with the issue, the fix, and the errors that keep coming back.">
 
 <!-- Chart.js from the one CDN the artifact sandbox allows, pinned.

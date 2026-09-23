@@ -240,13 +240,26 @@ function applyIndex(data, { fromCache = false, ageMs = 0 } = {}) {
     (excludedNote ? ` · ${excludedNote}` : "");
   $("scope-select").value = data.scope || "production";
 
-  const stamp = fromCache
-    ? `from this browser, ${relative(data.fetchedAt)}`
-    : data.cached
-    ? `cached ${relative(data.fetchedAt)}`
-    : `updated ${fmtDateTime(data.fetchedAt)}`;
-  $("freshness").textContent = stamp;
-  $("freshness").classList.toggle("stale", Boolean(data.stale));
+  const refresh = $("refresh");
+  if (data.snapshot) {
+    // A published snapshot carries no route back to Jira, so Refresh has
+    // nothing to fetch. Leaving it live made it look broken; it becomes the
+    // label for when this copy was taken.
+    refresh.textContent = `Snapshot · ${fmtDate(data.fetchedAt)}`;
+    refresh.disabled = true;
+    refresh.classList.add("is-static");
+    refresh.title = `A frozen copy of the OPS queue, exported ${fmtDateTime(data.fetchedAt)}. It cannot refresh itself — open the live dashboard for current data.`;
+    $("freshness").textContent = `${relative(data.fetchedAt)} · read-only`;
+    $("freshness").classList.remove("stale");
+  } else {
+    const stamp = fromCache
+      ? `from this browser, ${relative(data.fetchedAt)}`
+      : data.cached
+      ? `cached ${relative(data.fetchedAt)}`
+      : `updated ${fmtDateTime(data.fetchedAt)}`;
+    $("freshness").textContent = stamp;
+    $("freshness").classList.toggle("stale", Boolean(data.stale));
+  }
 
   renderAll();
 }
@@ -328,7 +341,9 @@ async function loadIndex({ refresh = false } = {}) {
     $("loan-list").innerHTML = "";
     $("loan-detail").innerHTML = '<div class="empty-state">Nothing loaded.</div>';
   } finally {
-    button.disabled = false;
+    // A snapshot's Refresh stays disabled — applyIndex has turned it into a
+    // label by this point.
+    if (!state.meta?.snapshot) button.disabled = false;
     setBusy(false);
   }
 }

@@ -861,3 +861,6 @@ body.is-loading .kpis { opacity: .45; pointer-events: none; transition: opacity 
 /* The whole-ticket summary sits above everything else in the panel. */
 .ticket-summary { border-bottom: 1px solid var(--border); padding-bottom: 14px; }
 .drawer-head .row { flex-wrap: wrap; row-gap: 6px; }
+
+/* Refresh, when there is nothing to refresh to: a label, not a dead button. */
+.icon-button.is-static { opacity: 1; cursor: default; background: none; border-style: dashed; }
