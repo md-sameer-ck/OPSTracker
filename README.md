@@ -257,6 +257,7 @@ checks the dataset is still whole afterwards:
 npm i -D playwright-core          # once; drives your installed Chrome
 npm run smoke -- local            # against the dev server
 npm run smoke -- artifact opstracker.html
+npm run connector -- opstracker.html   # the Atlassian MCP adapter, against its real reply shapes
 ```
 
 Several bugs here were invisible to unit tests and obvious within seconds of
@@ -349,17 +350,36 @@ thread and the fix digest.
 ### Refreshing a published snapshot
 
 The page has no server and no Jira token, but a viewer may have the **Atlassian
-connector** in Claude — and an artifact can call a viewer's own connectors with
+MCP connector** in Claude — and an artifact can call a viewer's own connectors with
 their credentials. So Refresh asks Jira for everything *changed since the export*
 and merges it in. That is a few dozen tickets rather than nine hundred, so it is
 one request, and it covers the case that matters: a ticket raised after the
 export is otherwise invisible in the snapshot for good. Opening such a ticket
 fetches its thread the same way.
 
-Refreshed tickets carry no status history — the connector's search cannot expand
-a changelog — so their work time and reopen count show as unknown until the next
-full export. Tickets that already existed keep the history they were exported
-with.
+The connector is **Atlassian MCP**, not Atlassian Rovo. Rovo answers
+`403 the app is not installed on this instance` for this site and enabling it
+needs an organisation admin; Atlassian MCP works with the same account and no
+admin involvement. It routes every operation through
+`executeRead({name, cloudId, inputs})` and reshapes the reply — custom fields
+come back keyed by their *display* name ("CK User", not `customfield_10067`),
+status loses its category, and bodies arrive as HTML whenever they hold media.
+`toNative()` in `scripts/build-artifact.js` undoes all three so the shared
+normaliser sees the shape it already understands. Status category is the one
+thing that cannot be recovered from the reply, so it is read off the export,
+which covers every status this project uses; an unrecognised status falls back
+to the middle category rather than risking being mistaken for done.
+
+Its search returns a thin projection whatever fields are asked for — no
+description, no `updated`, no resolution date — so search is used only to find
+*which* tickets moved, and each is then read in full, four at a time. That caps
+at 40 tickets per refresh: enough for any realistic gap, few enough not to fire
+hundreds of calls on a viewer's connector.
+
+Refreshed tickets carry no status history in the lists, so their work time and
+reopen count show as unknown there until the next full export. Opening one does
+fetch its changelog and comments, so the drawer shows the real timeline — which
+the Rovo connector could never do, since its search cannot expand a changelog.
 
 **The snapshot is a floor, never overwritten.** What Refresh returns is kept
 separately, in `opstracker-delta-v3`, and merged *over* the embedded snapshot on

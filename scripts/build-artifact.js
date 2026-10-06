@@ -134,11 +134,13 @@ window.__downloadsBlocked = true;
 // export is otherwise invisible here for good.
 const JIRA_CLOUD_ID = SNAPSHOT.index.cloudId || (SNAPSHOT.index.jiraBase || "").replace(/^https?:\\/\\//, "");
 // Viewers resolve connectors by their DISPLAY name, which is not the tool-name
-// segment: mcp__claude_ai_Atlassian_Rovo__* is shown to viewers as
-// "Atlassian Rovo". Passing anything else silently matches no connector.
-const CONNECTOR = "Atlassian Rovo";
-const REFRESH_TOOL = "searchJiraIssuesUsingJql";
-const DETAIL_TOOL = "getJiraIssue";
+// segment: mcp__claude_ai_Atlassian_MCP__* is shown to viewers as
+// "Atlassian MCP". Passing anything else silently matches no connector.
+//
+// Not "Atlassian Rovo": that connector answers 403 "the app is not installed on
+// this instance" for this site, and enabling it needs an org admin. This one
+// works with the same account and no admin involvement.
+const CONNECTOR = "Atlassian MCP";
 
 /** The connector, or null when this viewer has not connected it. */
 async function jiraConnector() {
@@ -160,43 +162,122 @@ function toolPayload(result) {
   }
 }
 
+
+// This connector exposes almost nothing as a named tool; operations go through
+// executeRead({name, cloudId, inputs}). It also reshapes the reply — custom
+// fields come back keyed by their display name, and status loses its category.
+// toNative() undoes both, so the shared normaliser (the same code the server
+// runs) sees the payload shape it already understands.
+async function jiraCall(mcp, name, inputs) {
+  const result = await mcp.callTool(CONNECTOR, "executeRead", { name, cloudId: JIRA_CLOUD_ID, inputs });
+  return toolPayload(result)?.data ?? null;
+}
+
+// Status category is never returned. The export covers every status this
+// project uses, so it is read from there; a status invented since then falls
+// back to the middle category rather than being mistaken for done, which is
+// the one guess that would silently drop a ticket out of the open queues.
+const STATUS_CATEGORY = new Map(SNAPSHOT.index.issues.map((issue) => [issue.status, issue.statusCategory]));
+
+// Bodies arrive as HTML whenever they hold media or panels, whatever format is
+// requested, and the page renders them as text.
+function htmlToText(value) {
+  if (typeof value !== "string" || !/<[a-z!\\/]/i.test(value)) return value;
+  return value
+    .replace(/<br\\s*\\/?>/gi, "\\n")
+    .replace(/<\\/(p|div|li|h[1-6])>/gi, "\\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#3[49];/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/[ \\t]+/g, " ")
+    .replace(/\\n{3,}/g, "\\n\\n")
+    .trim();
+}
+
+function toNative(raw, histories) {
+  const fields = { ...(raw?.fields || {}) };
+  for (const entry of Object.values(fields.customFields || {})) {
+    if (entry?.id) fields[entry.id] = entry.value ?? null;
+  }
+  delete fields.customFields;
+  if (fields.status?.name) {
+    fields.status = {
+      ...fields.status,
+      statusCategory: { key: STATUS_CATEGORY.get(fields.status.name) || "indeterminate" },
+    };
+  }
+  if (typeof fields.description === "string") fields.description = htmlToText(fields.description);
+  const native = { key: raw.key, id: raw.id, fields };
+  if (histories) native.changelog = { histories };
+  return native;
+}
+
+/** One ticket in full, in the shape the normaliser expects. */
+async function fetchNative(mcp, key, { withHistory = false } = {}) {
+  const [raw, changelog] = await Promise.all([
+    jiraCall(mcp, "getJiraIssue", { issueIdOrKey: key, fields: BASE_FIELDS, view: "full" }),
+    withHistory
+      ? jiraCall(mcp, "listJiraIssueChangelogs", { issueIdOrKey: key, maxResults: 100 }).catch(() => null)
+      : null,
+  ]);
+  return raw?.key ? toNative(raw, changelog?.values || null) : null;
+}
+
+// Search returns a thin projection whatever fields are asked for — no
+// description, no updated, no resolution date — so it is used only to find
+// WHICH tickets moved, and each is then read in full. A refresh is normally a
+// handful; the cap stops a long-neglected page firing hundreds of calls on the
+// viewer's account.
+const REFRESH_LIMIT = 40;
+
 window.__refreshFromJira = async function refreshFromJira(sinceIso) {
   const mcp = await jiraConnector();
   if (!mcp || !JIRA_CLOUD_ID) return null;
 
   const since = (sinceIso || SNAPSHOT.index.fetchedAt || "").slice(0, 10);
-  const result = await mcp.callTool(CONNECTOR, REFRESH_TOOL, {
-    cloudId: JIRA_CLOUD_ID,
+  const found = await jiraCall(mcp, "searchJiraIssuesUsingJql", {
     jql: \`project = \${SNAPSHOT.index.project || "OPS"} AND updated >= "\${since}" ORDER BY updated DESC\`,
-    fields: BASE_FIELDS,
-    maxResults: 100,
+    fields: ["summary"],
+    maxResults: REFRESH_LIMIT,
   });
 
-  const nodes = toolPayload(result)?.issues?.nodes || [];
-  // Shaped by exactly the same code the server uses, so a refreshed ticket is
-  // indistinguishable from an exported one — minus its status history, which
-  // this endpoint cannot expand.
-  return nodes.map((issue) => normaliseIssue(issue));
+  const keys = (found?.issues || []).map((issue) => issue.key).filter(Boolean);
+  if (!keys.length) return [];
+
+  // A few at a time: enough to not take a minute, not so many that a viewer's
+  // connector starts refusing. Status history is left to the drawer, where it
+  // is actually read, rather than doubling every refresh.
+  const issues = [];
+  for (let i = 0; i < keys.length; i += 4) {
+    const batch = await Promise.all(keys.slice(i, i + 4).map((key) => fetchNative(mcp, key).catch(() => null)));
+    for (const native of batch) if (native) issues.push(normaliseIssue(native));
+  }
+  return issues;
 };
 
 /** One ticket's thread, for a ticket raised after the snapshot was taken. */
 window.__fetchTicketFromJira = async function fetchTicketFromJira(key) {
   const mcp = await jiraConnector();
   if (!mcp || !JIRA_CLOUD_ID) return null;
-  const result = await mcp.callTool(CONNECTOR, DETAIL_TOOL, {
-    cloudId: JIRA_CLOUD_ID,
-    issueIdOrKey: key,
-    fields: [...BASE_FIELDS, "comment"],
-  });
-  const issue = toolPayload(result)?.issues?.nodes?.[0];
-  if (!issue) return null;
 
-  const record = normaliseIssue(issue, { full: true });
-  const comments = (issue.fields?.comment?.comments || []).map((c) => ({
+  const [native, commentPage] = await Promise.all([
+    fetchNative(mcp, key, { withHistory: true }),
+    jiraCall(mcp, "listJiraIssueComments", { issueIdOrKey: key, maxResults: 100, orderBy: "created" }).catch(
+      () => null
+    ),
+  ]);
+  if (!native) return null;
+
+  const record = normaliseIssue(native, { full: true });
+  const comments = (commentPage?.comments || []).map((c) => ({
     id: c.id,
     author: c.author?.displayName || "Unknown",
     authorId: c.author?.accountId || null,
-    body: fieldToText(c.body),
+    body: htmlToText(fieldToText(c.body)),
     created: c.created,
   }));
   const digest = buildDigest({
@@ -207,7 +288,7 @@ window.__fetchTicketFromJira = async function fetchTicketFromJira(key) {
     assigneeId: record.assignee?.accountId || null,
     reporterId: record.reporter?.accountId || null,
   });
-  return { ...record, url: \`\${SNAPSHOT.index.jiraBase}/browse/\${issue.key}\`, digest, thread: digest.thread };
+  return { ...record, url: \`\${SNAPSHOT.index.jiraBase}/browse/\${key}\`, digest, thread: digest.thread };
 };
 
 const SNAPSHOT_INDEX_BY_KEY = new Map(SNAPSHOT.index.issues.map((issue) => [issue.key, issue]));
